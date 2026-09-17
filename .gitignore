@@ -1,0 +1,15 @@
+__pycache__/
+dist/
+build/
+*.spec
+venv
+temp/ 
+*.jpg
+*.JPG
+*.JPEG
+len/
+*.len
+*.txt
+*.cmd
+.vscode/
+runtime/
