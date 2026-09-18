@@ -10,6 +10,7 @@
 - 🖼️ **孤立照片识别**：与相邻照片时间间隔较大的单张照片，归类到 `single_folder_name` 文件夹。
 - ❓ **无 EXIF 处理**：没有拍摄时间信息的图片，统一归入 `no_exif_folder_name` 文件夹。
 - ⚙️ **配置驱动**：源目录、输出方式、阈值、文件夹命名等全部通过 `photo_config.json` 配置，无需改代码。
+- 🔗 **硬链接整理**：默认以**硬链接**方式归类，原图保留且不重复占用磁盘空间；跨盘或文件系统不支持时自动退回复制。
 - 🐍 **纯 Python 实现**：轻量、跨平台。
 
 ## 📁 项目结构
@@ -18,6 +19,16 @@
 Picchooser/
 ├── Picchooser.py        # 主程序入口
 ├── photo_config.json    # 配置文件
+├── pyproject.toml       # 项目与依赖声明（uv 管理）
+├── Picchooser.spec      # PyInstaller 单文件打包配置
+├── setup.iss            # Inno Setup 安装包脚本
+├── tests/               # pytest 单元测试
+│   ├── conftest.py      # 共享夹具（生成带 EXIF 的测试图片）
+│   ├── test_config.py   # 配置加载
+│   ├── test_exif.py     # EXIF 拍摄时间解析
+│   ├── test_hardlink.py # 硬链接核心逻辑
+│   ├── test_classify.py # 分类流程端到端
+│   └── test_main.py     # 命令行入口
 ├── .gitignore           # Git 忽略规则
 ├── LICENSE              # 开源许可证
 └── README.md            # 项目说明文档
@@ -30,7 +41,7 @@ Picchooser/
 #### 1. 环境要求
 
 - Python 3.8 或更高版本
-- 需要安装 `exifread`
+- [uv](https://docs.astral.sh/uv/)（推荐，用于管理依赖与虚拟环境）
 
 #### 2. 克隆项目
 
@@ -39,11 +50,15 @@ git clone https://github.com/WZA-Leon/Picchooser.git
 cd Picchooser
 ```
 
-#### 3. 安装依赖
+#### 3. 安装依赖（uv）
 
 ```bash
-pip install exifread
+uv sync
 ```
+
+该命令会按 `pyproject.toml` 创建 `.venv` 并安装运行依赖（`exifread`）与开发依赖（`pytest` 等）。
+
+> 不使用 uv 也可以：`pip install exifread`
 
 #### 4. 配置
 
@@ -54,6 +69,7 @@ pip install exifread
   "source_folder": ".",
   "dest_folder": null,
   "copy_mode": true,
+  "fallback_copy": true,
   "burst_threshold": 3,
   "supported_ext": [".jpg", ".jpeg", ".JPG", ".JPEG"],
   "burst_folder_prefix": "连拍",
@@ -66,7 +82,8 @@ pip install exifread
 | --- | --- | --- |
 | `source_folder` | string | 待整理的源目录，默认为当前目录 `.` |
 | `dest_folder` | string \| null | 整理后的输出目录；为 `null` 时在源目录内生成分类文件夹 |
-| `copy_mode` | bool | `true` 复制（保留原图），`false` 移动 |
+| `copy_mode` | bool | `true` 硬链接（保留原图且不额外占用磁盘空间），`false` 移动原图 |
+| `fallback_copy` | bool | 仅 `copy_mode` 为 `true` 时生效：硬链接不可用（跨盘、文件系统不支持等）时是否退回复制。`false` 则直接报错 |
 | `burst_threshold` | int | 连拍判定阈值（秒）。两张照片拍摄间隔 ≤ 该值即视为同一组连拍 |
 | `supported_ext` | array | 需要处理的图片扩展名列表 |
 | `burst_folder_prefix` | string | 连拍文件夹的命名前缀 |
@@ -76,10 +93,59 @@ pip install exifread
 #### 5. 运行
 
 ```bash
-python Picchooser.py
+uv run python Picchooser.py
 ```
 
 程序会读取 `photo_config.json`，扫描源目录并自动完成分类整理。
+
+#### 6. 运行单元测试
+
+本项目使用 **pytest** 编写单元测试，依赖已包含在开发依赖组中：
+
+```bash
+uv run pytest
+```
+
+常用参数：
+
+```bash
+uv run pytest -q                  # 精简输出
+uv run pytest tests/test_hardlink.py   # 只跑硬链接相关测试
+uv run pytest -k "burst"          # 按关键字筛选
+```
+
+测试覆盖：配置加载与默认值兜底、EXIF 拍摄时间解析、**硬链接核心逻辑**（建链、幂等、跨盘退回复制、删除链接不影响原图）、分类分组流程（连拍/孤立/无 EXIF、阈值边界、多次连拍编号）以及命令行入口。
+
+
+### 自行打包为单文件 exe
+
+项目使用 **PyInstaller**（已包含在开发依赖组，`uv sync` 会自动安装）打包为**单文件** exe，配置文件为 `Picchooser.spec`。
+
+```bash
+uv run pyinstaller Picchooser.spec --noconfirm --clean
+```
+
+产物：
+
+```
+dist/
+└── picc.exe        # 单文件，约 8 MB，免安装、无需 Python 环境
+```
+
+把 `photo_config.json` 放在 **与 exe 相同的目录**（或运行时所在的当前目录）即可使用。
+
+`Picchooser.spec` 中的几个关键设置：
+
+| 设置 | 作用 |
+| --- | --- |
+| `EXE(... a.binaries, a.zipfiles, a.datas ...)` | 单文件模式：所有依赖都打进同一个 exe，运行时解压到临时目录 |
+| `console=True` | 保留控制台窗口，便于看到分类日志输出 |
+| `hiddenimports=["exifread"]` | 显式声明 `exifread`，避免动态导入被漏收 |
+| `excludes=[...]` | 排除 `PIL`、`numpy`、`tkinter`、`pytest` 等本项目用不到的重型库，显著减小体积 |
+| `upx=True` | 若系统装了 UPX 则自动压缩（未安装会跳过，不影响打包） |
+| `icon=...` | 存在 `icon.ico` 时用作 exe 图标；不存在则自动跳过 |
+
+> 💡 打包用的是 `Picchooser.spec` 而不是命令行参数，这样每次构建的配置都固定在版本库里，结果可复现。
 
 
 ### 直接获取 exe（免安装）
@@ -166,7 +232,7 @@ Picchooser
 3. 比较相邻照片的拍摄间隔：
    - 间隔 ≤ `burst_threshold` 秒 → 判定为 **连拍**，归入 `burst_folder_prefix` 命名的文件夹。
    - 间隔较大、孤立出现 → 归入 `single_folder_name`。
-4. 根据 `copy_mode` 决定是复制还是移动文件到 `dest_folder`（或源目录下的分类文件夹）。
+4. 根据 `copy_mode` 决定是建立硬链接还是移动原图到 `dest_folder`（或源目录下的分类文件夹）。
 
 ## 📝 示例
 
@@ -202,7 +268,17 @@ A：图片缺少 EXIF 数据（如经过压缩、截图、社交软件转发）�
 A：连拍通常是每秒数张，建议设为 `1~3` 秒；若想更宽松地合并相册，可适当调大。
 
 **Q：会修改我的原始照片吗？**
-A：`copy_mode` 为 `true` 时仅复制，原图不动；设为 `false` 时才会移动原图，请谨慎使用。
+A：`copy_mode` 为 `true` 时只建立**硬链接**，原图不动，而且分类结果不会重复占用磁盘空间；设为 `false` 时才会移动原图，请谨慎使用。
+
+**Q：硬链接和复制有什么区别？**
+A：硬链接让分类文件夹里的文件和原图指向**同一份数据**（同一个文件），因此：
+- 不会额外占用磁盘空间，整理大量照片时尤其明显；
+- 修改其中任意一处内容，另一处同步变化（例如用修图软件直接覆盖保存原图，需留意）；
+- **删除**其中一处不会影响另一处，只有全部链接都删除后数据才真正释放；
+- 硬链接不能跨磁盘分区，所以 `dest_folder` 若在另一个盘，会自动退回复制（由 `fallback_copy` 控制）。
+
+**Q：`fallback_copy` 设成 `false` 会怎样？**
+A：硬链接失败时程序会直接报错退出，而不是悄悄退回复制。适合你希望「要么硬链接、要么别动」的场景。
 
 ## 🤝 贡献
 

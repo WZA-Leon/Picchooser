@@ -33,7 +33,8 @@ CONFIG_FILE = _find_config()
 DEFAULT_CONFIG = {
     "source_folder": ".",  # 源图片文件夹；"." 或 null = 运行命令的当前目录
     "dest_folder": None,                      # None = 源目录下生成「分类结果」
-    "copy_mode": True,                        # True=复制；False=移动
+    "copy_mode": True,                        # True=硬链接（保留原图，不占额外空间）；False=移动
+    "fallback_copy": True,                    # 硬链接不可用时（跨盘/不支持）是否退回复制
     "burst_threshold": 1.0,                   # 连拍时间阈值（秒）
     "supported_ext": [".jpg", ".jpeg", ".JPG", ".JPEG"],  # 支持的图片格式
     "burst_folder_prefix": "连拍",            # 连拍文件夹前缀
@@ -87,6 +88,45 @@ def get_capture_time(img_path):
         return None
 
 
+def is_same_file(source_path, target_path):
+    """
+    判断两个路径是否指向同一个文件（同一个硬链接）
+    用 inode / 文件索引号比较，Windows 与 POSIX 均适用
+    :return: 相同返回True；无法判断返回False
+    """
+    try:
+        return os.path.samefile(source_path, target_path)
+    except OSError:
+        return False
+
+
+def link_file(source_path, target_path, fallback_copy=True):
+    """
+    为源文件创建硬链接到目标路径（保留原图，且不占用额外磁盘空间）
+    硬链接不可用时（跨盘、文件系统不支持、无权限等），可选择退回复制
+    :param source_path: 源文件完整路径
+    :param target_path: 目标文件完整路径
+    :param fallback_copy: True=硬链接失败时退回复制；False=直接报错
+    :return: "link" = 已建立硬链接；"copy" = 已退回复制
+    :raises OSError: 硬链接失败且不允许退回复制
+    """
+    # 目标已存在：已是同一硬链接则无需处理；否则删除后重建，避免 FileExistsError
+    if os.path.exists(target_path):
+        if is_same_file(source_path, target_path):
+            return "link"
+        os.remove(target_path)
+
+    try:
+        os.link(source_path, target_path)
+        return "link"
+    except OSError as e:
+        if not fallback_copy:
+            raise
+        log(f"[警告] 硬链接失败，改为复制：{os.path.basename(source_path)}（{e}）")
+        shutil.copy2(source_path, target_path)
+        return "copy"
+
+
 def classify_photos(config):
     """
     根据拍摄时间自动分类照片
@@ -103,6 +143,7 @@ def classify_photos(config):
     dest_dir = config["dest_folder"]
     log(f"源目录：{source_dir}")
     copy_mode = config["copy_mode"]
+    fallback_copy = config["fallback_copy"]
     burst_threshold = config["burst_threshold"]
     supported_ext = tuple(config["supported_ext"])
     burst_folder_prefix = config["burst_folder_prefix"]
@@ -159,9 +200,23 @@ def classify_photos(config):
     # ---------- 第四步：创建文件夹，分发文件 ----------
     os.makedirs(dest_dir, exist_ok=True)
     burst_index = 0
+    link_count = 0   # 成功建立硬链接的数量
+    copy_count = 0   # 退回复制的数量
 
     single_folder = os.path.join(dest_dir, single_folder_name)
     no_exif_folder = os.path.join(dest_dir, no_exif_folder_name)
+
+    def dispatch(file_path, target_folder):
+        """把文件放入目标文件夹：copy_mode 时建硬链接，否则移动原图"""
+        nonlocal link_count, copy_count
+        target_path = os.path.join(target_folder, os.path.basename(file_path))
+        if copy_mode:
+            if link_file(file_path, target_path, fallback_copy) == "link":
+                link_count += 1
+            else:
+                copy_count += 1
+        else:
+            shutil.move(file_path, target_path)
 
     for group in groups:
         if len(group) > 1:
@@ -171,31 +226,35 @@ def classify_photos(config):
             os.makedirs(target_folder, exist_ok=True)
 
             for _, file_path, fname in group:
-                target_path = os.path.join(target_folder, fname)
-                shutil.copy2(file_path, target_path) if copy_mode else shutil.move(file_path, target_path)
+                dispatch(file_path, target_folder)
             log(f"已分类 → {folder_name}（{len(group)} 张）")
         else:
             os.makedirs(single_folder, exist_ok=True)
             _, file_path, fname = group[0]
-            target_path = os.path.join(single_folder, fname)
-            shutil.copy2(file_path, target_path) if copy_mode else shutil.move(file_path, target_path)
+            dispatch(file_path, single_folder)
 
     if no_exif_files:
         os.makedirs(no_exif_folder, exist_ok=True)
         for file_path in no_exif_files:
-            fname = os.path.basename(file_path)
-            target_path = os.path.join(no_exif_folder, fname)
-            shutil.copy2(file_path, target_path) if copy_mode else shutil.move(file_path, target_path)
+            dispatch(file_path, no_exif_folder)
         log(f"无拍摄信息 → {len(no_exif_files)} 张")
 
     # ---------- 输出统计结果 ----------
     single_count = sum(1 for g in groups if len(g) == 1)
+    if copy_mode:
+        mode_line = f"处理方式：硬链接 {link_count} 张"
+        if copy_count:
+            mode_line += f"（其中 {copy_count} 张退回复制）"
+        mode_line += "\n"
+    else:
+        mode_line = "处理方式：移动原图\n"
     summary = (
         "分类完成！\n"
         f"共处理 {len(photo_with_time) + len(no_exif_files)} 张图片\n"
         f"连拍组：{burst_index} 组\n"
         f"孤立照片：{single_count} 张\n"
         f"无拍摄信息：{len(no_exif_files)} 张\n"
+        + mode_line +
         f"结果保存路径：{dest_dir}"
     )
     log("\n" + "=" * 40)
@@ -204,10 +263,20 @@ def classify_photos(config):
     return summary
 
 
-if __name__ == "__main__":
-    # 从 JSON 配置文件读取参数后运行分类（命令行输出，不弹窗）
+def main(config_path=CONFIG_FILE):
+    """
+    命令行入口：读取 JSON 配置后执行分类
+    :param config_path: JSON配置文件路径
+    :return: 成功返回0，出错返回1
+    """
     try:
-        config = load_config()
+        config = load_config(config_path)
         classify_photos(config)
+        return 0
     except Exception as e:
         print(f"运行出错：{e}", flush=True)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

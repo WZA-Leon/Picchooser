@@ -1,7 +1,6 @@
 __pycache__/
 dist/
 build/
-*.spec
 venv
 temp/ 
 *.jpg
@@ -13,3 +12,6 @@ len/
 *.cmd
 .vscode/
 runtime/
+.venv/
+.pytest_cache/
+*.exe
