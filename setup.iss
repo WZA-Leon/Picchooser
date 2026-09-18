@@ -38,14 +38,14 @@ LicenseFile=.\LICENSE
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
 OutputDir=.\dist
-OutputBaseFilename=picc
+OutputBaseFilename=piccsetup
 SetupIconFile=.\icon.ico
 SolidCompression=yes
 WizardStyle=modern dynamic windows11
 
 [Languages]
-Name: "simplechinese"; MessagesFile: "compiler:Languages\Simple Chinese.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "simplechinese"; MessagesFile: "compiler:Languages\Simple Chinese.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -134,19 +134,20 @@ begin
     SMTO_ABORTIFHUNG, 5000, ResultCode);
 end;
 
-{ 安装开始前记录 PATH 是否已包含安装目录，用于判断本次是否真的改动了 PATH }
-function InitializeSetup(): Boolean;
-begin
-  PathWasPresent := IsDirInPath(ExpandConstant('{app}'));
-  Result := True;
-end;
-
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  { 只有本次新加入了 PATH 才需要广播；重复安装且已存在时无需打扰系统 }
-  if (CurStep = ssPostInstall) and (not PathWasPresent) and
+  if CurStep = ssInstall then
+  begin
+    { 安装前记录 PATH 是否已包含安装目录，用于判断本次是否真的改动了 PATH }
+    { 注意：app 常量在 InitializeSetup 阶段尚未初始化，必须在 ssInstall 时才能展开 }
+    PathWasPresent := IsDirInPath(ExpandConstant('{app}'));
+  end
+  else if (CurStep = ssPostInstall) and (not PathWasPresent) and
      IsDirInPath(ExpandConstant('{app}')) then
+  begin
+    { 只有本次新加入了 PATH 才需要广播；重复安装且已存在时无需打扰系统 }
     BroadcastEnvironmentChange;
+  end;
 end;
 
 
