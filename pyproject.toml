@@ -1,12 +1,12 @@
 [project]
 name = "picchooser"
 version = "1.0.0"
-description = "基于 EXIF 拍摄时间的照片自动整理工具，按硬链接方式归类连拍与孤立照片"
+description = "基于 EXIF 拍摄时间的照片自动整理工具，按拍摄间隔归类连拍与孤立照片"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { file = "LICENSE" }
 authors = [{ name = "WZA-Leon" }]
-keywords = ["exif", "photo", "classify", "hardlink", "burst"]
+keywords = ["exif", "photo", "classify", "copy", "move", "burst"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
@@ -20,9 +20,6 @@ Repository = "https://github.com/WZA-Leon/Picchooser"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.0.0",
-    "piexif>=1.1.3",
-    "pillow>=10.0.0",
     "pyinstaller>=6.0.0",
 ]
 
@@ -36,10 +33,6 @@ sources = ["."]
 
 [tool.uv]
 package = false
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-v --tb=short"
 
 # ===================== 打包（PyInstaller，单文件） =====================
 # 打包配置在 Picchooser.spec 中；pyinstaller 由 dev 依赖组提供。

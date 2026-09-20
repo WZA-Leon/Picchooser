@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import errno
 import exifread
 import datetime
 import shutil
@@ -33,8 +34,7 @@ CONFIG_FILE = _find_config()
 DEFAULT_CONFIG = {
     "source_folder": ".",  # 源图片文件夹；"." 或 null = 运行命令的当前目录
     "dest_folder": None,                      # None = 源目录下生成「分类结果」
-    "copy_mode": True,                        # True=硬链接（保留原图，不占额外空间）；False=移动
-    "fallback_copy": True,                    # 硬链接不可用时（跨盘/不支持）是否退回复制
+    "copy_mode": True,                        # True=复制原图（保留原图）；False=移动原图
     "burst_threshold": 1.0,                   # 连拍时间阈值（秒）
     "supported_ext": [".jpg", ".jpeg", ".JPG", ".JPEG"],  # 支持的图片格式
     "burst_folder_prefix": "连拍",            # 连拍文件夹前缀
@@ -45,6 +45,35 @@ DEFAULT_CONFIG = {
 def log(message):
     """输出到控制台（命令行调用，立即刷新）"""
     print(message, flush=True)
+
+
+def is_disk_full_error(error):
+    """
+    判断异常是不是「磁盘空间不足」（兼容 Windows 与 POSIX）
+    :param error: 捕获到的异常对象
+    :return: 是磁盘满返回 True，否则 False
+    """
+    if getattr(error, "errno", None) == errno.ENOSPC:
+        return True
+    # Windows: 39=ERROR_HANDLE_DISK_FULL，112=ERROR_DISK_FULL
+    if getattr(error, "winerror", None) in (39, 112):
+        return True
+    return False
+
+
+def describe_error(error):
+    """
+    把底层异常翻译成更易懂的中文提示，便于命令行排查问题
+    :param error: 捕获到的异常对象
+    :return: 提示文本
+    """
+    if is_disk_full_error(error):
+        return f"磁盘空间不足，请清理磁盘后重试（{error}）"
+    if isinstance(error, PermissionError):
+        return f"没有访问权限，请检查文件/文件夹权限（{error}）"
+    if isinstance(error, FileNotFoundError):
+        return f"找不到文件或目录（{error}）"
+    return str(error)
 
 
 def load_config(config_path=CONFIG_FILE):
@@ -88,43 +117,24 @@ def get_capture_time(img_path):
         return None
 
 
-def is_same_file(source_path, target_path):
+def copy_or_move(source_path, target_path, copy_mode):
     """
-    判断两个路径是否指向同一个文件（同一个硬链接）
-    用 inode / 文件索引号比较，Windows 与 POSIX 均适用
-    :return: 相同返回True；无法判断返回False
-    """
-    try:
-        return os.path.samefile(source_path, target_path)
-    except OSError:
-        return False
-
-
-def link_file(source_path, target_path, fallback_copy=True):
-    """
-    为源文件创建硬链接到目标路径（保留原图，且不占用额外磁盘空间）
-    硬链接不可用时（跨盘、文件系统不支持、无权限等），可选择退回复制
+    把源文件复制或移动到目标路径
     :param source_path: 源文件完整路径
     :param target_path: 目标文件完整路径
-    :param fallback_copy: True=硬链接失败时退回复制；False=直接报错
-    :return: "link" = 已建立硬链接；"copy" = 已退回复制
-    :raises OSError: 硬链接失败且不允许退回复制
+    :param copy_mode: True=复制（保留原图）；False=移动（不保留原图）
+    :return: "copy" = 已复制；"move" = 已移动
+    :raises OSError: 复制/移动失败
     """
-    # 目标已存在：已是同一硬链接则无需处理；否则删除后重建，避免 FileExistsError
+    # 目标已存在时先删除，避免复制时覆盖冲突或移动时 FileExistsError
     if os.path.exists(target_path):
-        if is_same_file(source_path, target_path):
-            return "link"
         os.remove(target_path)
 
-    try:
-        os.link(source_path, target_path)
-        return "link"
-    except OSError as e:
-        if not fallback_copy:
-            raise
-        log(f"[警告] 硬链接失败，改为复制：{os.path.basename(source_path)}（{e}）")
+    if copy_mode:
         shutil.copy2(source_path, target_path)
         return "copy"
+    shutil.move(source_path, target_path)
+    return "move"
 
 
 def classify_photos(config):
@@ -143,7 +153,6 @@ def classify_photos(config):
     dest_dir = config["dest_folder"]
     log(f"源目录：{source_dir}")
     copy_mode = config["copy_mode"]
-    fallback_copy = config["fallback_copy"]
     burst_threshold = config["burst_threshold"]
     supported_ext = tuple(config["supported_ext"])
     burst_folder_prefix = config["burst_folder_prefix"]
@@ -156,17 +165,26 @@ def classify_photos(config):
 
     # 校验源目录
     if not os.path.isdir(source_dir):
+        log(f"[错误] 源目录不存在：{source_dir}")
         return f"源目录不存在：\n{source_dir}"
 
     # ---------- 第一步：遍历源目录，收集所有图片和拍摄时间 ----------
     photo_with_time = []  # 格式：(拍摄时间, 文件完整路径, 文件名)
     no_exif_files = []    # 读不到EXIF的文件列表
+    skipped_files = []    # 被跳过的、格式不支持的普通文件
 
-    for filename in os.listdir(source_dir):
+    try:
+        entries = os.listdir(source_dir)
+    except OSError as e:
+        log(f"[错误] 无法读取源目录：{source_dir}\n       原因：{describe_error(e)}")
+        return f"无法读取源目录：\n{source_dir}"
+
+    for filename in entries:
         file_full_path = os.path.join(source_dir, filename)
         if not os.path.isfile(file_full_path):
             continue
         if not filename.endswith(supported_ext):
+            skipped_files.append(filename)
             continue
 
         capture_time = get_capture_time(file_full_path)
@@ -175,8 +193,19 @@ def classify_photos(config):
         else:
             no_exif_files.append(file_full_path)
 
+    # 一张能用的图片都没有：区分「目录为空」和「格式都不支持」，给出更明确的提示
     if not photo_with_time and not no_exif_files:
+        if skipped_files:
+            log(f"[提示] 目录里有 {len(skipped_files)} 个文件，但没有一个是支持的图片格式")
+            log(f"       当前支持的格式：{'、'.join(config['supported_ext'])}")
+            log('       可修改配置 supported_ext 添加格式（例如 ".png"、".heic"）后重试')
+        else:
+            log(f"[提示] 源目录里没有找到任何文件：{source_dir}")
         return "源目录中未找到支持的图片文件"
+
+    # 有图片被处理，但同时也跳过了格式不支持的文件：提醒一下，避免漏图
+    if skipped_files:
+        log(f"[提示] 已跳过 {len(skipped_files)} 个格式不支持的文件（支持：{'、'.join(config['supported_ext'])}）")
 
     # ---------- 第二步：按拍摄时间从早到晚排序 ----------
     photo_with_time.sort(key=lambda item: item[0])
@@ -198,25 +227,25 @@ def classify_photos(config):
         groups.append(current_group)
 
     # ---------- 第四步：创建文件夹，分发文件 ----------
-    os.makedirs(dest_dir, exist_ok=True)
-    burst_index = 0
-    link_count = 0   # 成功建立硬链接的数量
-    copy_count = 0   # 退回复制的数量
+    try:
+        os.makedirs(dest_dir, exist_ok=True)
+    except OSError as e:
+        log(f"[错误] 无法创建结果文件夹：{dest_dir}\n       原因：{describe_error(e)}")
+        raise
 
+    burst_index = 0
     single_folder = os.path.join(dest_dir, single_folder_name)
     no_exif_folder = os.path.join(dest_dir, no_exif_folder_name)
 
     def dispatch(file_path, target_folder):
-        """把文件放入目标文件夹：copy_mode 时建硬链接，否则移动原图"""
-        nonlocal link_count, copy_count
+        """把文件放入目标文件夹：copy_mode 时复制原图，否则移动原图"""
         target_path = os.path.join(target_folder, os.path.basename(file_path))
-        if copy_mode:
-            if link_file(file_path, target_path, fallback_copy) == "link":
-                link_count += 1
-            else:
-                copy_count += 1
-        else:
-            shutil.move(file_path, target_path)
+        try:
+            copy_or_move(file_path, target_path, copy_mode)
+        except OSError as e:
+            if is_disk_full_error(e):
+                log(f"[错误] 磁盘空间不足，处理 {os.path.basename(file_path)} 时写入失败，请清理磁盘后重试")
+            raise
 
     for group in groups:
         if len(group) > 1:
@@ -242,10 +271,7 @@ def classify_photos(config):
     # ---------- 输出统计结果 ----------
     single_count = sum(1 for g in groups if len(g) == 1)
     if copy_mode:
-        mode_line = f"处理方式：硬链接 {link_count} 张"
-        if copy_count:
-            mode_line += f"（其中 {copy_count} 张退回复制）"
-        mode_line += "\n"
+        mode_line = "处理方式：复制原图\n"
     else:
         mode_line = "处理方式：移动原图\n"
     summary = (
@@ -263,18 +289,51 @@ def classify_photos(config):
     return summary
 
 
-def main(config_path=CONFIG_FILE):
+def ask_mode(default_copy=True, prompt=input):
     """
-    命令行入口：读取 JSON 配置后执行分类
+    程序开始时询问用户采用哪种处理方式
+    :param default_copy: 直接回车时采用的默认值（True=复制，False=移动）
+    :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    :return: True=复制原图；False=移动原图
+    """
+    default_hint = "复制" if default_copy else "移动"
+    tip = (
+        "请选择处理方式：\n"
+        "  [1] 复制原图（保留原图，占用额外磁盘空间）\n"
+        "  [2] 移动原图（不保留原图）\n"
+        f"请输入 1 或 2（直接回车默认：{default_hint}）："
+    )
+    while True:
+        try:
+            answer = prompt(tip).strip()
+        except EOFError:
+            # 非交互环境（无标准输入）：直接采用默认值
+            log(f"[提示] 未检测到交互输入，采用默认方式：{default_hint}")
+            return default_copy
+
+        if answer == "":
+            return default_copy
+        if answer == "1":
+            return True
+        if answer == "2":
+            return False
+        log("输入无效，请输入 1 或 2，或直接回车使用默认值。")
+
+
+def main(config_path=CONFIG_FILE, prompt=input):
+    """
+    命令行入口：读取 JSON 配置、询问处理方式后执行分类
     :param config_path: JSON配置文件路径
+    :param prompt: 询问输入的读取函数（默认 input，便于测试注入）
     :return: 成功返回0，出错返回1
     """
     try:
         config = load_config(config_path)
+        config["copy_mode"] = ask_mode(config.get("copy_mode", True), prompt)
         classify_photos(config)
         return 0
     except Exception as e:
-        print(f"运行出错：{e}", flush=True)
+        print(f"运行出错：{describe_error(e)}", flush=True)
         return 1
 
 

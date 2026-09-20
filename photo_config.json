@@ -1,7 +1,6 @@
 {"source_folder":".",
 "dest_folder":null,
 "copy_mode":true,
-"fallback_copy":true,
 "burst_threshold":3,
 "supported_ext":[".jpg",".jpeg",".JPG",".JPEG"],
 "burst_folder_prefix":"连拍",
