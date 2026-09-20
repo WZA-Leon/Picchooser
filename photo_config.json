@@ -1,8 +1,15 @@
-{"source_folder":".",
-"dest_folder":null,
-"copy_mode":true,
-"burst_threshold":3,
-"supported_ext":[".jpg",".jpeg",".JPG",".JPEG"],
-"burst_folder_prefix":"连拍",
-"single_folder_name":"孤立的照片",
-"no_exif_folder_name":"无拍摄信息"}
+{
+  "source_folder": ".",
+  "dest_folder": null,
+  "copy_mode": true,
+  "burst_threshold": 3,
+  "supported_ext": [
+    ".jpg",
+    ".jpeg",
+    ".JPG",
+    ".JPEG"
+  ],
+  "burst_folder_prefix": "连拍",
+  "single_folder_name": "孤立的照片",
+  "no_exif_folder_name": "无拍摄信息"
+}

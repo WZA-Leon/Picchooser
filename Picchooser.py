@@ -43,8 +43,102 @@ DEFAULT_CONFIG = {
 }
 
 def log(message):
-    """输出到控制台（命令行调用，立即刷新）"""
-    print(message, flush=True)
+    """输出到控制台（命令行调用，立即刷新）；按前缀自动着色"""
+    print(auto_colorize(message), flush=True)
+
+
+# ===================== 控制台颜色高亮 =====================
+# ANSI 转义序列；当控制台不支持或输出被重定向时自动降级为纯文本
+ANSI_RESET = "\033[0m"
+ANSI_COLORS = {
+    "red": "\033[31m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "blue": "\033[34m",
+    "cyan": "\033[36m",
+    "white": "\033[37m",
+    "bold": "\033[1m",
+}
+# 是否启用颜色：默认关闭，由 enable_ansi() 打开
+_COLOR_ENABLED = False
+
+
+def enable_ansi():
+    """
+    尝试启用控制台 ANSI 颜色支持（Windows 10+），失败则保持纯文本
+    :return: 启用成功返回 True
+    """
+    global _COLOR_ENABLED
+
+    # 输出被重定向到文件/管道时不着色，避免留下转义字符
+    if not sys.stdout.isatty():
+        _COLOR_ENABLED = False
+        return False
+
+    # 非 Windows（POSIX）终端默认支持 ANSI
+    if os.name != "nt":
+        _COLOR_ENABLED = True
+        return True
+
+    try:
+        # 打开 Windows 控制台的虚拟终端处理（ENABLE_VIRTUAL_TERMINAL_PROCESSING）
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.c_uint32()
+        if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            _COLOR_ENABLED = False
+            return False
+        # 0x0004 = ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        if not kernel32.SetConsoleMode(handle, mode.value | 0x0004):
+            _COLOR_ENABLED = False
+            return False
+        _COLOR_ENABLED = True
+        return True
+    except Exception:
+        _COLOR_ENABLED = False
+        return False
+
+
+def colorize(text, color):
+    """
+    给文本套上颜色（未启用颜色时原样返回）
+    :param text: 原始文本
+    :param color: ANSI_COLORS 中的颜色名
+    :return: 着色后的文本
+    """
+    if not _COLOR_ENABLED:
+        return text
+    code = ANSI_COLORS.get(color, "")
+    if not code:
+        return text
+    return f"{code}{text}{ANSI_RESET}"
+
+
+def log_colored(message, color):
+    """输出带颜色的控制台信息"""
+    log(colorize(message, color))
+
+
+def auto_colorize(message):
+    """
+    根据消息前缀自动推断颜色，让普通 log() 调用也能高亮
+    :param message: 消息文本
+    :return: 着色后的文本
+    """
+    if not _COLOR_ENABLED:
+        return message
+    stripped = message.lstrip()
+    if stripped.startswith("[错误]"):
+        return colorize(message, "red")
+    if stripped.startswith("[完成]"):
+        return colorize(message, "green")
+    if stripped.startswith("[警告]"):
+        return colorize(message, "red")
+    if stripped.startswith("[提示]"):
+        return colorize(message, "cyan")
+    return message
 
 
 def is_disk_full_error(error):
@@ -164,15 +258,15 @@ def edit_config(config, config_path=CONFIG_FILE, prompt=input):
     """
     while True:
         log("")
-        log("===== 修改配置 =====")
+        log_colored("===== 修改配置 =====", "cyan")
         for i, field in enumerate(EDITABLE_FIELDS, start=1):
             value = config.get(field)
             if isinstance(value, list):
                 value = "、".join(str(x) for x in value)
             elif value is None:
                 value = "（默认）"
-            log(f"  [{i}] {field} = {value}")
-        log("  [0] 返回")
+            log_colored(f"  [{i}] {field} = {value}", "white")
+        log_colored("  [0] 返回", "white")
 
         try:
             choice = prompt("请输入要修改的序号（0 返回）：").strip()
@@ -303,14 +397,14 @@ def classify_photos(config):
         else:
             no_exif_files.append(file_full_path)
 
-    # 一张能用的图片都没有：区分「目录为空」和「格式都不支持」，给出更明确的提示
+        # 一张能用的图片都没有：区分「目录为空」和「格式都不支持」，给出更明确的提示
     if not photo_with_time and not no_exif_files:
         if skipped_files:
-            log(f"[提示] 目录里有 {len(skipped_files)} 个文件，但没有一个是支持的图片格式")
+            log(f"[错误] 目录里有 {len(skipped_files)} 个文件，但没有一个是支持的图片格式")
             log(f"       当前支持的格式：{'、'.join(config['supported_ext'])}")
             log('       可修改配置 supported_ext 添加格式（例如 ".png"、".heic"）后重试')
         else:
-            log(f"[提示] 源目录里没有找到任何文件：{source_dir}")
+            log(f"[错误] 源目录里没有找到任何文件：{source_dir}")
         return "源目录中未找到支持的图片文件"
 
     # 有图片被处理，但同时也跳过了格式不支持的文件：提醒一下，避免漏图
@@ -393,9 +487,10 @@ def classify_photos(config):
         + mode_line +
         f"结果保存路径：{dest_dir}"
     )
-    log("\n" + "=" * 40)
+    log(colorize("\n" + "=" * 40, "white"))
+    log_colored("分类完成！", "green")
     log(summary)
-    log("=" * 40)
+    log(colorize("=" * 40, "white"))
     return summary
 
 
@@ -409,16 +504,21 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None):
     """
     default_hint = "复制" if default_copy else "移动"
     menu = (
-        "请选择处理方式：\n"
-        "  [1] 复制原图（保留原图，占用额外磁盘空间）\n"
-        "  [2] 移动原图（不保留原图）\n"
+        colorize("请选择处理方式：", "cyan") + "\n"
+        + colorize("  [1] 复制原图（保留原图，占用额外磁盘空间）", "white") + "\n"
+        + colorize("  [2] 移动原图（不保留原图）", "white") + "\n"
     )
     if on_edit is not None:
-        menu += "  [3] 修改配置\n"
+        menu += colorize("  [3] 修改配置", "white") + "\n"
         tail = "请输入 1 / 2 / 3"
     else:
         tail = "请输入 1 或 2"
-    tip = menu + f"{tail}（直接回车默认：{default_hint}）："
+    tip = (
+        menu
+        + colorize(tail + "（直接回车默认：", "cyan")
+        + colorize(default_hint, "yellow")
+        + colorize("）：", "cyan")
+    )
 
     while True:
         try:
@@ -472,12 +572,14 @@ def main(config_path=CONFIG_FILE, prompt=input):
         )
         classify_photos(config)
         return 0
+    
     except Exception as e:
-        print(f"运行出错：{describe_error(e)}", flush=True)
+        log_colored(f"运行出错：{describe_error(e)}", "red")
         return 1
 
 
 if __name__ == "__main__":
+    enable_ansi()
     exit_code = main()
     pause_before_exit()
     sys.exit(exit_code)
