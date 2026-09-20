@@ -97,6 +97,116 @@ def load_config(config_path=CONFIG_FILE):
         return config
 
 
+def save_config(config, config_path=CONFIG_FILE):
+    """
+    把配置写回 JSON 文件（UTF-8、缩进、保留中文）
+    :param config: 配置字典
+    :param config_path: JSON配置文件路径
+    :raises OSError: 写入失败
+    """
+    with open(config_path, 'w', encoding='utf-8') as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+# 「修改配置」菜单里可编辑的字段（顺序即菜单顺序）
+EDITABLE_FIELDS = (
+    "source_folder",
+    "dest_folder",
+    "copy_mode",
+    "burst_threshold",
+    "supported_ext",
+    "burst_folder_prefix",
+    "single_folder_name",
+    "no_exif_folder_name",
+)
+
+
+def parse_config_value(field, raw):
+    """
+    把用户在菜单里输入的字符串，按字段类型转换成正确的值
+    :param field: 字段名
+    :param raw: 用户输入的原始字符串
+    :return: 转换后的值
+    :raises ValueError: 输入不合法
+    """
+    text = raw.strip()
+    if field == "copy_mode":
+        if text.lower() in ("true", "1", "yes", "y", "是", "复制"):
+            return True
+        if text.lower() in ("false", "0", "no", "n", "否", "移动"):
+            return False
+        raise ValueError("copy_mode 只能填 true 或 false")
+    if field == "burst_threshold":
+        try:
+            return float(text)
+        except ValueError:
+            raise ValueError("burst_threshold 必须是数字（如 1 或 3.5）")
+    if field == "dest_folder":
+        if text == "" or text.lower() == "null":
+            return None
+    if field == "supported_ext":
+        items = [part.strip() for part in text.replace(";", ",").split(",")]
+        items = [item for item in items if item]
+        if not items:
+            raise ValueError("supported_ext 至少要有一个扩展名（如 .jpg,.png）")
+        return items
+    # 其余字段按字符串处理
+    return raw if field != "dest_folder" else text
+
+
+def edit_config(config, config_path=CONFIG_FILE, prompt=input):
+    """
+    交互式修改配置：列出字段和当前值，选择序号修改并写回文件
+    :param config: 当前配置字典（会被就地更新）
+    :param config_path: JSON配置文件路径
+    :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    :return: 修改后的配置字典
+    """
+    while True:
+        log("")
+        log("===== 修改配置 =====")
+        for i, field in enumerate(EDITABLE_FIELDS, start=1):
+            value = config.get(field)
+            if isinstance(value, list):
+                value = "、".join(str(x) for x in value)
+            elif value is None:
+                value = "（默认）"
+            log(f"  [{i}] {field} = {value}")
+        log("  [0] 返回")
+
+        try:
+            choice = prompt("请输入要修改的序号（0 返回）：").strip()
+        except EOFError:
+            log("[提示] 未检测到交互输入，跳过修改配置")
+            return config
+
+        if choice == "0" or choice == "":
+            return config
+        if not choice.isdigit() or not (1 <= int(choice) <= len(EDITABLE_FIELDS)):
+            log("输入无效，请输入列表中的序号。")
+            continue
+
+        field = EDITABLE_FIELDS[int(choice) - 1]
+        try:
+            raw = prompt(f"请输入 {field} 的新值（dest_folder 输入 null 表示默认）：")
+        except EOFError:
+            log("[提示] 未检测到交互输入，跳过修改配置")
+            return config
+
+        try:
+            config[field] = parse_config_value(field, raw)
+        except ValueError as e:
+            log(f"[错误] {e}")
+            continue
+
+        try:
+            save_config(config, config_path)
+        except OSError as e:
+            log(f"[错误] 保存配置失败：{describe_error(e)}")
+            continue
+        log(f"[完成] 已保存：{field} = {config[field]}")
+
+
 def get_capture_time(img_path):
     """
     读取图片EXIF中的原始拍摄时间
@@ -289,20 +399,27 @@ def classify_photos(config):
     return summary
 
 
-def ask_mode(default_copy=True, prompt=input):
+def ask_mode(default_copy=True, prompt=input, on_edit=None):
     """
-    程序开始时询问用户采用哪种处理方式
+    程序开始时询问用户采用哪种处理方式；可选择进入「修改配置」
     :param default_copy: 直接回车时采用的默认值（True=复制，False=移动）
     :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    :param on_edit: 选择 [3] 修改配置时调用的回调，返回后重新询问；为 None 时不显示该选项
     :return: True=复制原图；False=移动原图
     """
     default_hint = "复制" if default_copy else "移动"
-    tip = (
+    menu = (
         "请选择处理方式：\n"
         "  [1] 复制原图（保留原图，占用额外磁盘空间）\n"
         "  [2] 移动原图（不保留原图）\n"
-        f"请输入 1 或 2（直接回车默认：{default_hint}）："
     )
+    if on_edit is not None:
+        menu += "  [3] 修改配置\n"
+        tail = "请输入 1 / 2 / 3"
+    else:
+        tail = "请输入 1 或 2"
+    tip = menu + f"{tail}（直接回车默认：{default_hint}）："
+
     while True:
         try:
             answer = prompt(tip).strip()
@@ -317,7 +434,22 @@ def ask_mode(default_copy=True, prompt=input):
             return True
         if answer == "2":
             return False
-        log("输入无效，请输入 1 或 2，或直接回车使用默认值。")
+        if answer == "3" and on_edit is not None:
+            on_edit()
+            continue
+        log(f"输入无效，请输入 {tail.replace('请输入 ', '')}，或直接回车使用默认值。")
+
+
+def pause_before_exit(prompt=input):
+    """
+    结束后等待用户按回车再退出，避免双击运行时窗口一闪而过看不到结果
+    :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    """
+    try:
+        prompt("\n按回车键退出...")
+    except EOFError:
+        # 非交互环境（如管道、重定向）：无输入可等，直接退出
+        pass
 
 
 def main(config_path=CONFIG_FILE, prompt=input):
@@ -329,7 +461,15 @@ def main(config_path=CONFIG_FILE, prompt=input):
     """
     try:
         config = load_config(config_path)
-        config["copy_mode"] = ask_mode(config.get("copy_mode", True), prompt)
+
+        # 在「选择处理方式」菜单里提供「修改配置」入口；改完重新读取配置
+        def on_edit():
+            edit_config(config, config_path, prompt)
+            config.update(load_config(config_path))
+
+        config["copy_mode"] = ask_mode(
+            config.get("copy_mode", True), prompt, on_edit=on_edit
+        )
         classify_photos(config)
         return 0
     except Exception as e:
@@ -338,4 +478,6 @@ def main(config_path=CONFIG_FILE, prompt=input):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = main()
+    pause_before_exit()
+    sys.exit(exit_code)
