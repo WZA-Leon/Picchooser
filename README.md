@@ -1,3 +1,9 @@
+
+<div align="center">
+  <img src="https://raw.githubusercontent.com/WZA-Leon/Picchooser/main/icons/icon.png" alt="ICON" width="100%">
+</div>
+
+
 # Picchooser
 
 一个基于 **EXIF 拍摄时间** 的照片自动整理工具。它会扫描指定目录下的图片，读取每张照片的拍摄时间，并按照拍摄间隔把照片自动归类为 **连拍**、**孤立的照片** 和 **无拍摄信息** 三类，帮你快速清理和归档照片。
