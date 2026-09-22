@@ -58,6 +58,8 @@ ANSI_COLORS = {
     "cyan": "\033[36m",
     "white": "\033[37m",
     "bold": "\033[1m",
+    # 橙色：用 256 色模式的 208 号色，兼容主流现代终端
+    "orange": "\033[38;5;208m",
 }
 # 是否启用颜色：默认关闭，由 enable_ansi() 打开
 _COLOR_ENABLED = False
@@ -494,25 +496,214 @@ def classify_photos(config):
     return summary
 
 
-def ask_mode(default_copy=True, prompt=input, on_edit=None):
+def get_source_dir(config):
     """
-    程序开始时询问用户采用哪种处理方式；可选择进入「修改配置」
+    根据配置解析出真正的源目录绝对路径
+    :param config: 配置字典
+    :return: 源目录绝对路径
+    """
+    source_dir = config.get("source_folder")
+    if source_dir in (None, "", "."):
+        return os.getcwd()
+    return os.path.abspath(source_dir)
+
+
+def get_supported_files(dir_path, supported_ext):
+    """
+    列出目录下扩展名属于 supported_ext 的文件（只统计文件，不含子目录）
+    :param dir_path: 目录路径
+    :param supported_ext: 支持的扩展名序列，如 [".jpg", ".png"]
+    :return: 匹配到的文件名列表；目录不可读时返回 None
+    """
+    try:
+        entries = os.listdir(dir_path)
+    except OSError:
+        return None
+    exts = tuple(supported_ext)
+    return [name for name in entries
+            if name.endswith(exts) and os.path.isfile(os.path.join(dir_path, name))]
+
+
+def has_supported_files(dir_path, supported_ext, max_depth=3):
+    """
+    递归判断目录内（含子目录）是否存在支持的图片文件，最多向下搜索 max_depth 层
+    :param dir_path: 目录路径
+    :param supported_ext: 支持的扩展名序列
+    :param max_depth: 最大递归层数（3 表示包含自身所在层，向下探 2 层）
+    :return: 存在支持的图片返回 True，否则 False
+    """
+    if get_supported_files(dir_path, supported_ext):
+        return True
+    if max_depth <= 1:
+        return False
+    for folder in list_subfolders(dir_path):
+        if has_supported_files(folder, supported_ext, max_depth - 1):
+            return True
+    return False
+
+
+def clear_screen():
+    """清空控制台屏幕（兼容 Windows 与 POSIX）"""
+    os.system("cls" if os.name == "nt" else "clear")
+
+
+def list_subfolders(dir_path):
+    """
+    列出目录下的子文件夹（按名称排序），用于「选择文件夹」菜单
+    :param dir_path: 目录路径
+    :return: 子文件夹完整路径列表；不可读时返回空列表
+    """
+    try:
+        entries = os.listdir(dir_path)
+    except OSError:
+        return []
+    folders = [os.path.join(dir_path, name) for name in entries
+               if os.path.isdir(os.path.join(dir_path, name))]
+    folders.sort(key=lambda p: os.path.basename(p).lower())
+    return folders
+
+
+def list_drives():
+    """
+    列出可切换的磁盘分区（根目录），用于在磁盘根目录时切换分区
+    :return: 分区根路径列表，如 ["C:\\", "D:\\"]；不支持的平台返回空列表
+    """
+    drives = []
+    if os.name == "nt":
+        # Windows：遍历所有盘符，挑选真实存在的分区
+        import string
+        for letter in string.ascii_uppercase:
+            root = f"{letter}:\\"
+            if os.path.exists(root):
+                drives.append(root)
+    else:
+        # POSIX：/ 是根，其它挂载点难以可靠枚举，仅返回根目录
+        if os.path.exists("/"):
+            drives.append("/")
+    return drives
+
+
+def choose_folder(start_dir, supported_ext, prompt=input):
+    """
+    交互式切换目录：列出当前目录的子文件夹和上级目录，用 1、2、3… 选择
+    选中没有支持的图片的目录后，可继续进入下级文件夹或返回上级
+    :param start_dir: 起始目录（当前源目录）
+    :param supported_ext: 支持的扩展名序列
+    :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    :return: 选中的目录绝对路径；用户取消则返回 None
+    """
+    current = os.path.abspath(start_dir)
+
+    while True:
+        clear_screen()
+        # 递归（最多 3 层）判断当前目录及其子目录是否存在支持的图片
+        has_supported = has_supported_files(current, supported_ext, max_depth=3)
+        no_supported = not has_supported
+
+        log("")
+        log_colored("===== 选择文件夹 =====", "cyan")
+        log_colored(f"  当前目录：{current}", "white")
+        if no_supported:
+            log_colored("  （该目录及其子目录均没有支持的图片）", "yellow")
+
+        # 收集可选目标：返回上级 + 子文件夹 + 当前目录，按序号对应
+        options = []  # 按序号存放可选目录的完整路径
+
+        # 上级目录（始终放在第一个位置）；若已是根目录则改为「切换分区」
+        parent = os.path.dirname(current)
+        if parent and parent != current:
+            log_colored(f"    [1] .. （返回上级目录）", "white")
+            options.append(parent)
+        else:
+            # 已是磁盘根目录：列出其它分区供切换
+            drives = [d for d in list_drives() if os.path.abspath(d) != current]
+            if drives:
+                log_colored("  切换分区：", "white")
+                for drive in drives:
+                    log_colored(f"    [{len(options) + 1}] {drive}", "orange")
+                    options.append(drive)
+
+        # 子文件夹（同级选项：用橙色高亮）；标记其子目录中是否含支持的图片
+        log_colored("  子文件夹：", "white")
+        subfolders = list_subfolders(current)
+        if subfolders:
+            for folder in subfolders:
+                # 递归（最多 3 层）判断该子文件夹内是否有支持的图片
+                if has_supported_files(folder, supported_ext, max_depth=2):
+                    mark = ""
+                else:
+                    mark = "（无支持图片）"
+                log_colored(f"    [{len(options) + 1}] {os.path.basename(folder)} {mark}", "orange")
+                options.append(folder)
+        else:
+            log_colored("    （没有子文件夹）", "white")
+
+        # 使用当前目录
+        use_current_index = len(options) + 1
+        log_colored(f"    [{use_current_index}] 使用当前目录", "white")
+        log_colored("    [0] 取消", "white")
+
+        try:
+            choice = prompt("请选择要切换到的文件夹序号（0 取消）：").strip()
+        except EOFError:
+            log("[提示] 未检测到交互输入，取消切换目录")
+            return None
+
+        if choice == "0" or choice == "":
+            return None
+        if not choice.isdigit():
+            log("输入无效，请输入列表中的序号。")
+            continue
+
+        num = int(choice)
+        if num == use_current_index:
+            if no_supported:
+                log("[警告] 当前目录及其子目录都没有支持的图片，请选择其它文件夹。")
+                continue
+            return current
+        if 1 <= num <= len(options):
+            current = options[num - 1]
+            # 选中上级目录时直接切换；选中无图片的子目录时停留在其中继续选择
+            continue
+        log("输入无效，请输入列表中的序号。")
+
+
+def ask_mode(default_copy=True, prompt=input, on_edit=None,
+             source_dir=None, supported_ext=(), on_change_dir=None):
+    """
+    程序开始时询问用户采用哪种处理方式；可选择进入「修改配置」或「切换目录」
     :param default_copy: 直接回车时采用的默认值（True=复制，False=移动）
     :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
     :param on_edit: 选择 [3] 修改配置时调用的回调，返回后重新询问；为 None 时不显示该选项
+    :param source_dir: 当前源目录；当目录内没有支持的图片时，会提示可切换目录
+    :param supported_ext: 支持的扩展名序列，用于判断目录内是否有图片
+    :param on_change_dir: 选择 [4] 切换目录时调用的回调，返回后重新询问；为 None 时不显示该选项
     :return: True=复制原图；False=移动原图
     """
     default_hint = "复制" if default_copy else "移动"
-    menu = (
-        colorize("请选择处理方式：", "cyan") + "\n"
-        + colorize("  [1] 复制原图（保留原图，占用额外磁盘空间）", "white") + "\n"
+
+    # 递归（最多 3 层）判断当前目录是否缺少支持的图片，用于给出提示
+    no_supported = (
+        source_dir is not None
+        and not has_supported_files(source_dir, supported_ext, max_depth=3)
+    )
+
+    valid_choices = ["1", "2"]
+    menu = colorize("请选择处理方式：", "cyan") + "\n"
+    if no_supported:
+        menu += colorize("  [提示] 当前目录没有找到支持的图片文件", "yellow") + "\n"
+    menu += (
+        colorize("  [1] 复制原图（保留原图，占用额外磁盘空间）", "white") + "\n"
         + colorize("  [2] 移动原图（不保留原图）", "white") + "\n"
     )
     if on_edit is not None:
         menu += colorize("  [3] 修改配置", "white") + "\n"
-        tail = "请输入 1 / 2 / 3"
-    else:
-        tail = "请输入 1 或 2"
+        valid_choices.append("3")
+    if on_change_dir is not None:
+        # 切换目录始终可用：即使当前目录有支持的图片，也允许更改目录
+        menu += colorize("  [4] 切换目录", "white") + "\n"
+        valid_choices.append("4")
+    tail = "请输入 " + " / ".join(valid_choices)
     tip = (
         menu
         + colorize(tail + "（直接回车默认：", "cyan")
@@ -536,6 +727,9 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None):
             return False
         if answer == "3" and on_edit is not None:
             on_edit()
+            continue
+        if answer == "4" and on_change_dir is not None:
+            on_change_dir()
             continue
         log(f"输入无效，请输入 {tail.replace('请输入 ', '')}，或直接回车使用默认值。")
 
@@ -567,9 +761,28 @@ def main(config_path=CONFIG_FILE, prompt=input):
             edit_config(config, config_path, prompt)
             config.update(load_config(config_path))
 
+        def on_change_dir():
+            """选择 [4] 切换目录：进入文件夹选择菜单，选中后更新配置并保存"""
+            new_dir = choose_folder(
+                get_source_dir(config), config["supported_ext"], prompt
+            )
+            if not new_dir:
+                return
+            config["source_folder"] = new_dir
+            try:
+                save_config(config, config_path)
+                log(f"[完成] 已切换源目录：{new_dir}")
+            except OSError as e:
+                log(f"[错误] 保存配置失败：{describe_error(e)}")
+
+                # 主菜单循环：切换目录/修改配置后会重新询问；选定处理方式即进入分类
         config["copy_mode"] = ask_mode(
-            config.get("copy_mode", True), prompt, on_edit=on_edit
+            config.get("copy_mode", True), prompt, on_edit=on_edit,
+            source_dir=get_source_dir(config),
+            supported_ext=config["supported_ext"],
+            on_change_dir=on_change_dir,
         )
+
         classify_photos(config)
         return 0
     

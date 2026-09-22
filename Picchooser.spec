@@ -23,8 +23,8 @@ a = Analysis(
     hiddenimports=["exifread"],
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
-        # 体积优化：排除本项目用不到的重型库，显著减小单文件体积
+        runtime_hooks=[],
+    # 体积优化：排除本项目用不到的重型库，显著减小单文件体积
     excludes=[
         "tkinter",
         "unittest",
