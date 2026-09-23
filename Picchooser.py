@@ -258,8 +258,16 @@ def edit_config(config, config_path=CONFIG_FILE, prompt=input):
     :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
     :return: 修改后的配置字典
     """
+    # 记录上一次的保存/错误提示，清屏后补打，避免提示被清掉看不到
+    last_notice = None
+
     while True:
-        log("")
+        # 每次显示菜单前清屏，避免历史输出堆叠
+        clear_screen()
+        if last_notice:
+            log(last_notice)
+            log("")
+            last_notice = None
         log_colored("===== 修改配置 =====", "cyan")
         for i, field in enumerate(EDITABLE_FIELDS, start=1):
             value = config.get(field)
@@ -277,9 +285,11 @@ def edit_config(config, config_path=CONFIG_FILE, prompt=input):
             return config
 
         if choice == "0" or choice == "":
+            # 返回主菜单前清屏，避免残留的配置菜单挡在主菜单前面
+            clear_screen()
             return config
         if not choice.isdigit() or not (1 <= int(choice) <= len(EDITABLE_FIELDS)):
-            log("输入无效，请输入列表中的序号。")
+            last_notice = "输入无效，请输入列表中的序号。"
             continue
 
         field = EDITABLE_FIELDS[int(choice) - 1]
@@ -292,15 +302,15 @@ def edit_config(config, config_path=CONFIG_FILE, prompt=input):
         try:
             config[field] = parse_config_value(field, raw)
         except ValueError as e:
-            log(f"[错误] {e}")
+            last_notice = f"[错误] {e}"
             continue
 
         try:
             save_config(config, config_path)
         except OSError as e:
-            log(f"[错误] 保存配置失败：{describe_error(e)}")
+            last_notice = f"[错误] 保存配置失败：{describe_error(e)}"
             continue
-        log(f"[完成] 已保存：{field} = {config[field]}")
+        last_notice = f"[完成] 已保存：{field} = {config[field]}"
 
 
 def get_capture_time(img_path):
@@ -602,7 +612,8 @@ def choose_folder(start_dir, supported_ext, prompt=input):
 
         log("")
         log_colored("===== 选择文件夹 =====", "cyan")
-        log_colored(f"  当前目录：{current}", "white")
+        # 当前目录用橙色高亮，方便一眼确认所在位置
+        log_colored(f"  当前目录：{current}", "orange")
         if no_supported:
             log_colored("  （该目录及其子目录均没有支持的图片）", "yellow")
 
@@ -620,10 +631,11 @@ def choose_folder(start_dir, supported_ext, prompt=input):
             if drives:
                 log_colored("  切换分区：", "white")
                 for drive in drives:
-                    log_colored(f"    [{len(options) + 1}] {drive}", "orange")
+                    # 分区选项用青色高亮，与子文件夹区分开
+                    log_colored(f"    [{len(options) + 1}] {drive}", "cyan")
                     options.append(drive)
 
-        # 子文件夹（同级选项：用橙色高亮）；标记其子目录中是否含支持的图片
+        # 子文件夹：含支持图片的用绿色高亮，不含的用白色并加标记
         log_colored("  子文件夹：", "white")
         subfolders = list_subfolders(current)
         if subfolders:
@@ -631,9 +643,11 @@ def choose_folder(start_dir, supported_ext, prompt=input):
                 # 递归（最多 3 层）判断该子文件夹内是否有支持的图片
                 if has_supported_files(folder, supported_ext, max_depth=2):
                     mark = ""
+                    color = "green"
                 else:
                     mark = "（无支持图片）"
-                log_colored(f"    [{len(options) + 1}] {os.path.basename(folder)} {mark}", "orange")
+                    color = "white"
+                log_colored(f"    [{len(options) + 1}] {os.path.basename(folder)} {mark}", color)
                 options.append(folder)
         else:
             log_colored("    （没有子文件夹）", "white")
@@ -650,6 +664,8 @@ def choose_folder(start_dir, supported_ext, prompt=input):
             return None
 
         if choice == "0" or choice == "":
+            # 取消切换：清屏后再返回，避免残留的菜单挡在主菜单前面
+            clear_screen()
             return None
         if not choice.isdigit():
             log("输入无效，请输入列表中的序号。")
@@ -660,8 +676,11 @@ def choose_folder(start_dir, supported_ext, prompt=input):
             if no_supported:
                 log("[警告] 当前目录及其子目录都没有支持的图片，请选择其它文件夹。")
                 continue
+            clear_screen()
             return current
         if 1 <= num <= len(options):
+            # 选中目标后清屏，再进入下一轮（展示新目录内容）
+            clear_screen()
             current = options[num - 1]
             # 选中上级目录时直接切换；选中无图片的子目录时停留在其中继续选择
             continue
@@ -678,40 +697,48 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
     :param source_dir: 当前源目录；当目录内没有支持的图片时，会提示可切换目录
     :param supported_ext: 支持的扩展名序列，用于判断目录内是否有图片
     :param on_change_dir: 选择 [4] 切换目录时调用的回调，返回后重新询问；为 None 时不显示该选项
-    :return: True=复制原图；False=移动原图
+    :return: True=复制原图；False=移动原图；None=用户选择退出
     """
     default_hint = "复制" if default_copy else "移动"
 
-    # 递归（最多 3 层）判断当前目录是否缺少支持的图片，用于给出提示
-    no_supported = (
-        source_dir is not None
-        and not has_supported_files(source_dir, supported_ext, max_depth=3)
-    )
-
-    valid_choices = ["1", "2"]
-    menu = colorize("请选择处理方式：", "cyan") + "\n"
-    if no_supported:
-        menu += colorize("  [提示] 当前目录没有找到支持的图片文件", "yellow") + "\n"
-    menu += (
-        colorize("  [1] 复制原图（保留原图，占用额外磁盘空间）", "white") + "\n"
-        + colorize("  [2] 移动原图（不保留原图）", "white") + "\n"
-    )
-    if on_edit is not None:
-        menu += colorize("  [3] 修改配置", "white") + "\n"
-        valid_choices.append("3")
-    if on_change_dir is not None:
-        # 切换目录始终可用：即使当前目录有支持的图片，也允许更改目录
-        menu += colorize("  [4] 切换目录", "white") + "\n"
-        valid_choices.append("4")
-    tail = "请输入 " + " / ".join(valid_choices)
-    tip = (
-        menu
-        + colorize(tail + "（直接回车默认：", "cyan")
-        + colorize(default_hint, "yellow")
-        + colorize("）：", "cyan")
-    )
-
     while True:
+        # 每次显示主菜单前清屏，保证从子菜单/切换目录返回后界面干净
+        clear_screen()
+
+        # 递归（最多 3 层）判断当前目录是否缺少支持的图片，用于给出提示
+        no_supported = (
+            source_dir is not None
+            and not has_supported_files(source_dir, supported_ext, max_depth=3)
+        )
+
+        valid_choices = ["1", "2"]
+        menu = colorize("请选择处理方式：", "cyan") + "\n"
+        # 显示当前操作目录（源目录），让用户随时确认会对哪个路径操作（黄色高亮）
+        if source_dir is not None:
+            menu += colorize(f"  当前操作目录：{source_dir}", "yellow") + "\n"
+        if no_supported:
+            menu += colorize("  [提示] 当前目录没有找到支持的图片文件", "yellow") + "\n"
+        menu += (
+            colorize("  [1] 复制原图（保留原图，占用额外磁盘空间）", "white") + "\n"
+            + colorize("  [2] 移动原图（不保留原图）", "white") + "\n"
+        )
+        if on_edit is not None:
+            menu += colorize("  [3] 修改配置", "white") + "\n"
+            valid_choices.append("3")
+        if on_change_dir is not None:
+            # 切换目录始终可用：即使当前目录有支持的图片，也允许更改目录
+            menu += colorize("  [4] 切换目录", "white") + "\n"
+            valid_choices.append("4")
+        menu += colorize("  [0] 退出", "white") + "\n"
+        valid_choices.append("0")
+        tail = "请输入 " + " / ".join(valid_choices)
+        tip = (
+            menu
+            + colorize(tail + "（直接回车默认：", "cyan")
+            + colorize(default_hint, "yellow")
+            + colorize("）：", "cyan")
+        )
+
         try:
             answer = prompt(tip).strip()
         except EOFError:
@@ -725,13 +752,17 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
             return True
         if answer == "2":
             return False
+        if answer == "0":
+            return None
         if answer == "3" and on_edit is not None:
             on_edit()
+            # 返回后回到循环头部，会先清屏再重新显示主菜单
             continue
         if answer == "4" and on_change_dir is not None:
             on_change_dir()
             continue
         log(f"输入无效，请输入 {tail.replace('请输入 ', '')}，或直接回车使用默认值。")
+        pause_before_exit(prompt)
 
 
 def pause_before_exit(prompt=input):
@@ -756,6 +787,11 @@ def main(config_path=CONFIG_FILE, prompt=input):
     try:
         config = load_config(config_path)
 
+        # 若配置里保存了固定的源目录（非 "." / 空），提示"已加载上次目录"
+        saved_source = config.get("source_folder")
+        if saved_source not in (None, "", "."):
+            log(f"[提示] 已加载上次目录：{os.path.abspath(saved_source)}")
+
         # 在「选择处理方式」菜单里提供「修改配置」入口；改完重新读取配置
         def on_edit():
             edit_config(config, config_path, prompt)
@@ -772,18 +808,29 @@ def main(config_path=CONFIG_FILE, prompt=input):
             try:
                 save_config(config, config_path)
                 log(f"[完成] 已切换源目录：{new_dir}")
+                log("[完成] 已保存至配置文件，下次启动时自动切换到当前目录")
             except OSError as e:
                 log(f"[错误] 保存配置失败：{describe_error(e)}")
 
-                # 主菜单循环：切换目录/修改配置后会重新询问；选定处理方式即进入分类
-        config["copy_mode"] = ask_mode(
-            config.get("copy_mode", True), prompt, on_edit=on_edit,
-            source_dir=get_source_dir(config),
-            supported_ext=config["supported_ext"],
-            on_change_dir=on_change_dir,
-        )
+        # 主循环：切换目录/修改配置后会重新询问；分类完成后回到菜单再次询问
+        while True:
+            mode = ask_mode(
+                config.get("copy_mode", True), prompt, on_edit=on_edit,
+                source_dir=get_source_dir(config),
+                supported_ext=config["supported_ext"],
+                on_change_dir=on_change_dir,
+            )
+            if mode is None:
+                # 用户选择 [0] 退出
+                break
 
-        classify_photos(config)
+            config["copy_mode"] = mode
+            # 进入分类前清屏，避免菜单与处理日志混在一起
+            clear_screen()
+            classify_photos(config)
+            # 分类结束后暂停，让用户看清结果，再返回主菜单
+            pause_before_exit(prompt)
+
         return 0
     
     except Exception as e:
