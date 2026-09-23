@@ -19,6 +19,22 @@ def get_app_dir():
     return os.path.dirname(os.path.abspath(__file__))
 
 
+def get_resource_path(filename):
+    """
+    获取随程序分发的资源文件（如教程 txt）的完整路径
+    打包为单文件 exe 时，资源会被解包到 sys._MEIPASS 临时目录；
+    源码运行时直接取脚本所在目录。
+    :param filename: 资源文件名，如 "tutorial.txt"
+    :return: 资源文件完整路径
+    """
+    if getattr(sys, 'frozen', False):
+        # PyInstaller onefile：优先用解包目录
+        base_dir = getattr(sys, '_MEIPASS', get_app_dir())
+    else:
+        base_dir = get_app_dir()
+    return os.path.join(base_dir, filename)
+
+
 # ===================== 配置文件 =====================
 # JSON配置文件路径：优先运行命令的当前目录，其次程序所在目录
 def _find_config():
@@ -688,15 +704,17 @@ def choose_folder(start_dir, supported_ext, prompt=input):
 
 
 def ask_mode(default_copy=True, prompt=input, on_edit=None,
-             source_dir=None, supported_ext=(), on_change_dir=None):
+             source_dir=None, supported_ext=(), on_change_dir=None,
+             on_tutorial=None):
     """
-    程序开始时询问用户采用哪种处理方式；可选择进入「修改配置」或「切换目录」
+    程序开始时询问用户采用哪种处理方式；可选择进入「修改配置」「切换目录」或「软件教程」
     :param default_copy: 直接回车时采用的默认值（True=复制，False=移动）
     :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
     :param on_edit: 选择 [3] 修改配置时调用的回调，返回后重新询问；为 None 时不显示该选项
     :param source_dir: 当前源目录；当目录内没有支持的图片时，会提示可切换目录
     :param supported_ext: 支持的扩展名序列，用于判断目录内是否有图片
     :param on_change_dir: 选择 [4] 切换目录时调用的回调，返回后重新询问；为 None 时不显示该选项
+    :param on_tutorial: 选择 [5] 软件教程时调用的回调，返回后重新询问；为 None 时不显示该选项
     :return: True=复制原图；False=移动原图；None=用户选择退出
     """
     default_hint = "复制" if default_copy else "移动"
@@ -729,6 +747,9 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
             # 切换目录始终可用：即使当前目录有支持的图片，也允许更改目录
             menu += colorize("  [4] 切换目录", "white") + "\n"
             valid_choices.append("4")
+        if on_tutorial is not None:
+            menu += colorize("  [5] 软件教程", "white") + "\n"
+            valid_choices.append("5")
         menu += colorize("  [0] 退出", "white") + "\n"
         valid_choices.append("0")
         tail = "请输入 " + " / ".join(valid_choices)
@@ -761,8 +782,67 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
         if answer == "4" and on_change_dir is not None:
             on_change_dir()
             continue
+        if answer == "5" and on_tutorial is not None:
+            on_tutorial()
+            continue
         log(f"输入无效，请输入 {tail.replace('请输入 ', '')}，或直接回车使用默认值。")
         pause_before_exit(prompt)
+
+
+class SafeFormatDict(dict):
+    """
+    用于 str.format_map 的安全字典：缺失的键保持 {key} 原样，不抛 KeyError
+    """
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def show_tutorial(config, prompt=input):
+    """
+    显示「软件教程」：从 tutorial.txt 逐行读取内容并打印，回车后返回主菜单
+    :param config: 当前配置字典，用于填充教程里的动态占位符（源目录等）
+    :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    """
+    clear_screen()
+
+    tutorial_path = get_resource_path("tutorial.txt")
+    # 占位符替换用的值；未在模板中出现的键无所谓，缺失的键用空串兜底
+    fields = {
+        "source_dir": get_source_dir(config),
+        "copy_mode": "复制" if config.get("copy_mode", True) else "移动",
+        "burst_threshold": config.get("burst_threshold"),
+        "supported_ext": "、".join(config.get("supported_ext", [])),
+    }
+
+    try:
+        with open(tutorial_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError as e:
+        log_colored(f"[错误] 无法读取教程文件：{describe_error(e)}", "red")
+        try:
+            prompt("按回车键返回主菜单...")
+        except EOFError:
+            pass
+        clear_screen()
+        return
+
+    for line in lines:
+        # 去掉行尾换行符；用 format_map 替换 {xxx} 占位符，未知字段保持原样
+        text = line.rstrip("\n")
+        text = text.format_map(SafeFormatDict(fields))
+        # 标题行（带 ===== 或 【】）用青色高亮，其余原样输出
+        if text.startswith("=====") or (text.startswith("【") and text.endswith("】")):
+            log_colored(text, "cyan")
+        else:
+            log(text)
+
+    log("")
+    try:
+        prompt("按回车键返回主菜单...")
+    except EOFError:
+        # 非交互环境：无需等待，直接返回
+        pass
+    clear_screen()
 
 
 def pause_before_exit(prompt=input):
@@ -812,6 +892,10 @@ def main(config_path=CONFIG_FILE, prompt=input):
             except OSError as e:
                 log(f"[错误] 保存配置失败：{describe_error(e)}")
 
+        def on_tutorial():
+            """选择 [5] 软件教程：显示使用说明，回车后返回主菜单"""
+            show_tutorial(config, prompt)
+
         # 主循环：切换目录/修改配置后会重新询问；分类完成后回到菜单再次询问
         while True:
             mode = ask_mode(
@@ -819,6 +903,7 @@ def main(config_path=CONFIG_FILE, prompt=input):
                 source_dir=get_source_dir(config),
                 supported_ext=config["supported_ext"],
                 on_change_dir=on_change_dir,
+                on_tutorial=on_tutorial,
             )
             if mode is None:
                 # 用户选择 [0] 退出
