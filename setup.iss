@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "Picchooser"
-#define MyAppVersion "1.0"
+#define MyAppVersion "1.3"
 #define MyAppPublisher "魏子昂软件工作室"
 #define MyAppURL "https://github.com/WZA-Leon/Picchooser"
 #define MyAppExeName "picc.exe"

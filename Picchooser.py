@@ -767,12 +767,15 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
             log(f"[提示] 未检测到交互输入，采用默认方式：{default_hint}")
             return default_copy
 
-        if answer == "":
-            return default_copy
-        if answer == "1":
-            return True
-        if answer == "2":
-            return False
+        if answer in ("", "1", "2"):
+            # 目录内没有支持的图片时，视为非法输入：提示并等待回车后重新显示菜单（否则进分类必然报错）
+            if no_supported:
+                log(f"输入无效，请输入 {tail.replace('请输入 ', '')}。")
+                wait_for_enter(prompt)
+                continue
+            if answer == "":
+                return default_copy
+            return answer == "1"
         if answer == "0":
             return None
         if answer == "3" and on_edit is not None:
@@ -843,6 +846,18 @@ def show_tutorial(config, prompt=input):
         # 非交互环境：无需等待，直接返回
         pass
     clear_screen()
+
+
+def wait_for_enter(prompt=input):
+    """
+    等待用户按回车继续（用于提示信息后重新显示菜单前，避免提示被清屏冲掉）
+    :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    """
+    try:
+        prompt("按回车键重新选择...")
+    except EOFError:
+        # 非交互环境（如管道、重定向）：无输入可等，直接返回
+        pass
 
 
 def pause_before_exit(prompt=input):
