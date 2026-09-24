@@ -36,12 +36,49 @@ def get_resource_path(filename):
 
 
 # ===================== 配置文件 =====================
-# JSON配置文件路径：优先运行命令的当前目录，其次程序所在目录
+def _get_user_config_dir():
+    """
+    获取用户级配置目录（跨平台）
+    - Windows: %APPDATA%\\Picchooser
+    - macOS:   ~/Library/Application Support/Picchooser
+    - Linux:   ~/.config/Picchooser
+    打包成 .app / .exe 双击运行时，程序所在目录通常不可写，只能落到这里。
+    :return: 用户配置目录绝对路径（会尝试创建；创建失败也返回路径）
+    """
+    if os.name == "nt":
+        base = os.path.join(
+            os.environ.get("APPDATA", os.path.expanduser("~")), "Picchooser"
+        )
+    elif sys.platform == "darwin":
+        base = os.path.join(
+            os.path.expanduser("~"), "Library", "Application Support", "Picchooser"
+        )
+    else:
+        base = os.path.join(os.path.expanduser("~"), ".config", "Picchooser")
+    try:
+        os.makedirs(base, exist_ok=True)
+    except OSError:
+        # 创建失败也没关系，后面写文件时会再报错
+        pass
+    return base
+
+
 def _find_config():
+    """
+    查找配置文件路径，优先级：
+    1. 运行命令的当前目录（便携使用：把配置放在工作目录）
+    2. 程序所在目录（源码旁边放着配置）
+    3. 用户级配置目录（打包后双击运行时唯一可写位置）
+    """
     cwd_cfg = os.path.join(os.getcwd(), "photo_config.json")
     if os.path.isfile(cwd_cfg):
         return cwd_cfg
-    return os.path.join(get_app_dir(), "photo_config.json")
+
+    app_cfg = os.path.join(get_app_dir(), "photo_config.json")
+    if os.path.isfile(app_cfg):
+        return app_cfg
+
+    return os.path.join(_get_user_config_dir(), "photo_config.json")
 
 
 CONFIG_FILE = _find_config()
@@ -93,7 +130,7 @@ def enable_ansi():
         _COLOR_ENABLED = False
         return False
 
-    # 非 Windows（POSIX）终端默认支持 ANSI
+    # 非 Windows（POSIX，含 macOS / Linux）终端默认支持 ANSI
     if os.name != "nt":
         _COLOR_ENABLED = True
         return True
@@ -216,6 +253,13 @@ def save_config(config, config_path=CONFIG_FILE):
     :param config_path: JSON配置文件路径
     :raises OSError: 写入失败
     """
+    # 确保父目录存在（用户配置目录 / 切目录场景下可能还没有）
+    parent = os.path.dirname(os.path.abspath(config_path))
+    if parent and not os.path.isdir(parent):
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError:
+            pass
     with open(config_path, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
 
@@ -425,7 +469,7 @@ def classify_photos(config):
         else:
             no_exif_files.append(file_full_path)
 
-        # 一张能用的图片都没有：区分「目录为空」和「格式都不支持」，给出更明确的提示
+    # 一张能用的图片都没有：区分「目录为空」和「格式都不支持」，给出更明确的提示
     if not photo_with_time and not no_exif_files:
         if skipped_files:
             log(f"[错误] 目录里有 {len(skipped_files)} 个文件，但没有一个是支持的图片格式")
@@ -591,8 +635,11 @@ def list_subfolders(dir_path):
 
 def list_drives():
     """
-    列出可切换的磁盘分区（根目录），用于在磁盘根目录时切换分区
-    :return: 分区根路径列表，如 ["C:\\", "D:\\"]；不支持的平台返回空列表
+    列出可切换的根路径，用于在根目录时切换磁盘/卷
+    - Windows: 所有存在盘符，如 ["C:\\\\", "D:\\\\"]
+    - macOS:   "/" 与 /Volumes 下的挂载点（外接盘、U 盘、磁盘映像等）
+    - Linux:   仅返回 "/"（其它挂载点难以可靠枚举）
+    :return: 根路径列表
     """
     drives = []
     if os.name == "nt":
@@ -602,10 +649,29 @@ def list_drives():
             root = f"{letter}:\\"
             if os.path.exists(root):
                 drives.append(root)
-    else:
-        # POSIX：/ 是根，其它挂载点难以可靠枚举，仅返回根目录
+        return drives
+
+    if sys.platform == "darwin":
+        # macOS：根目录 + /Volumes 下的所有挂载卷
         if os.path.exists("/"):
             drives.append("/")
+        volumes = "/Volumes"
+        if os.path.isdir(volumes):
+            try:
+                for name in sorted(os.listdir(volumes)):
+                    # 跳过隐藏项，避免出现 .DS_Store 之类
+                    if name.startswith("."):
+                        continue
+                    path = os.path.join(volumes, name)
+                    if os.path.isdir(path):
+                        drives.append(path)
+            except OSError:
+                pass
+        return drives
+
+    # 其它 POSIX（Linux 等）
+    if os.path.exists("/"):
+        drives.append("/")
     return drives
 
 
@@ -642,10 +708,11 @@ def choose_folder(start_dir, supported_ext, prompt=input):
             log_colored(f"    [1] .. （返回上级目录）", "white")
             options.append(parent)
         else:
-            # 已是磁盘根目录：列出其它分区供切换
-            drives = [d for d in list_drives() if os.path.abspath(d) != current]
+            # 已是根目录（Windows 盘符根 / POSIX 的 "/"）：列出其它可切换位置
+            drives = [d for d in list_drives()
+                      if os.path.abspath(d) != current]
             if drives:
-                log_colored("  切换分区：", "white")
+                log_colored("  切换分区 / 卷：", "white")
                 for drive in drives:
                     # 分区选项用青色高亮，与子文件夹区分开
                     log_colored(f"    [{len(options) + 1}] {drive}", "cyan")
@@ -932,7 +999,7 @@ def main(config_path=CONFIG_FILE, prompt=input):
             pause_before_exit(prompt)
 
         return 0
-    
+
     except Exception as e:
         log_colored(f"运行出错：{describe_error(e)}", "red")
         return 1
