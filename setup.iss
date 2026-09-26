@@ -41,11 +41,11 @@ OutputDir=.\dist
 OutputBaseFilename=piccsetup
 SetupIconFile=.\icon.ico
 SolidCompression=yes
-WizardStyle=modern dynamic windows11
+WizardStyle=modern dynamic polar
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
-Name: "simplechinese"; MessagesFile: "compiler:Languages\Simple Chinese.isl"
+Name: "chinese"; MessagesFile: "compiler:Languages\Chinese.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
@@ -64,6 +64,10 @@ Source: "PicchooserGUI.py"; DestDir: "{app}"; Flags: ignoreversion
 ; 原生缩略图 DLL（GUI 用；缺失时 GUI 会自动回退到 Pillow 缩放）
 Source: "thumbnail\thumbnail.dll"; DestDir: "{app}\thumbnail"; Flags: ignoreversion
 Source: "photo_config.json"; DestDir: "{app}"; Flags: ignoreversion
+; 程序图标（GUI 窗口图标等运行时使用）
+Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
+; 软件教程文本（主程序 [5] 软件教程 读取）
+Source: "tutorial.txt"; DestDir: "{app}"; Flags: ignoreversion
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Registry]
