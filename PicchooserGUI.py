@@ -1,19 +1,22 @@
 # -*- coding: utf-8 -*-
 """Picchooser 精细筛片 GUI。
 
-本程序独立运行，不读取 photo_config.json。它把「分类结果」目录下的各分类
-子文件夹（连拍1、连拍2、孤立照片、无拍摄信息 …）作为左侧分组列表，
-右侧大图 + 缩略图条浏览，人工挑选「成片」：
+本程序把「分类结果」目录下的各分类子文件夹（连拍1、连拍2、孤立照片、
+无拍摄信息 …）作为左侧分组列表，右侧大图 + 缩略图条浏览，人工挑选「成片」：
 
-- 左侧列表区（占 1/5）：显示各分组，左右方向键切换分组。
+- 左侧列表区（占 1/5）：显示各分组，上下方向键切换分组。
 - 右侧看片区（占 4/5）：
     * 上方：当前图片的大图预览。
     * 下方：当前分组内其它图片的缩略图条。
 - 交互：
     * 回车：把当前图片复制到「成片」文件夹并标绿；再次回车取消（删除副本）。
-    * 滚轮 / 上下方向键：切换当前图片。
+    * 滚轮 / 左右方向键：切换当前图片。
 
-「分类结果」目录的确定方式：命令行参数优先，否则用本脚本所在目录。
+「分类结果」目录的确定顺序：
+    1. 显式参数（供 Picchooser.py 菜单调用）
+    2. 命令行参数
+    3. photo_config.json：dest_folder 有值就用它，否则用 source_folder
+    4. 脚本所在目录
 程序会识别该目录下是否存在含受支持图片的分类子文件夹；若没有则弹窗提示。
 「成片」文件夹输出在「分类结果」目录下。
 
@@ -25,6 +28,7 @@ IShellItemImageFactory 接口获取；DLL 缺失时自动回退到 Pillow 缩放
 """
 
 import ctypes
+import json
 import os
 import shutil
 import sys
@@ -37,6 +41,7 @@ from PIL import Image, ImageTk
 # 常量
 # ---------------------------------------------------------------------------
 
+CONFIG_FILE = "photo_config.json"  # 与 Picchooser.py 共用的配置文件
 DLL_NAME = "thumbnail.dll"
 DLL_SUBDIR = "thumbnail"          # DLL 相对本脚本的存放子目录
 DONE_FOLDER_NAME = "成片"          # 成片输出文件夹名
@@ -193,13 +198,40 @@ class PicchooserGUI:
 
     # ---------------- 目录 ----------------
 
+    def _load_config(self):
+        """读取 photo_config.json（与 Picchooser.py 共用）。失败返回 {}。"""
+        base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, CONFIG_FILE)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
     def _resolve_result_dir(self, result_dir=None):
-        """分类结果目录：显式参数优先，其次命令行参数，否则脚本所在目录。"""
+        """分类结果目录的确定顺序：
+
+        1. 显式参数 result_dir（供 Picchooser.py 菜单调用）
+        2. 命令行参数 sys.argv[1]
+        3. photo_config.json：dest_folder 有值就用它，否则直接用 source_folder
+        4. 脚本所在目录
+        """
         if result_dir:
             return os.path.abspath(result_dir)
         if len(sys.argv) > 1 and sys.argv[1].strip():
             return os.path.abspath(sys.argv[1])
-        return os.path.dirname(os.path.abspath(__file__))
+
+        base = os.path.dirname(os.path.abspath(__file__))
+        config = self._load_config()
+
+        dest = config.get("dest_folder")
+        if dest:
+            return os.path.abspath(dest)
+
+        src = config.get("source_folder") or "."
+        if src in (".", ""):
+            return base
+        return os.path.abspath(src)
 
     # ---------------- 界面构建 ----------------
 
@@ -254,17 +286,17 @@ class PicchooserGUI:
         self.thumb_canvas.configure(xscrollcommand=self.thumb_scroll.set)
 
         # 底部提示
-        hint = ("← → 切换分组    ↑ ↓ / 滚轮 切换图片    "
+        hint = ("↑ ↓ 切换分组    ← → / 滚轮 切换图片    "
                 "回车 选为成片 / 取消    成片目录：" + DONE_FOLDER_NAME)
         tk.Label(self.root, text=hint, anchor="w", bg=COLOR_PANEL,
                  fg=COLOR_TEXT_DIM, padx=10, pady=4,
                  font=("Microsoft YaHei UI", 9)).pack(side="bottom", fill="x")
 
     def _bind_keys(self):
-        self.root.bind("<Left>", lambda e: self._switch_group(-1))
-        self.root.bind("<Right>", lambda e: self._switch_group(1))
-        self.root.bind("<Up>", lambda e: self._switch_photo(-1))
-        self.root.bind("<Down>", lambda e: self._switch_photo(1))
+        self.root.bind("<Up>", lambda e: self._switch_group(-1))
+        self.root.bind("<Down>", lambda e: self._switch_group(1))
+        self.root.bind("<Left>", lambda e: self._switch_photo(-1))
+        self.root.bind("<Right>", lambda e: self._switch_photo(1))
         self.root.bind("<Return>", lambda e: self._toggle_done())
         self.root.bind("<KP_Enter>", lambda e: self._toggle_done())
         # 滚轮切换图片
