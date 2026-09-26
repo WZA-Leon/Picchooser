@@ -54,6 +54,7 @@ COLOR_LIST_SEL = "#094771"
 COLOR_TEXT = "#d4d4d4"
 COLOR_TEXT_DIM = "#808080"
 COLOR_DONE = "#4caf50"            # 已选成片的绿色
+COLOR_ADD = "#007acc"             # 提示「回车添加」的蓝色
 COLOR_THUMB_BG = "#333333"
 COLOR_THUMB_SEL = "#007acc"
 
@@ -236,11 +237,26 @@ class PicchooserGUI:
     # ---------------- 界面构建 ----------------
 
     def _build_ui(self):
-        # 顶部状态栏
+        # 顶部状态栏（左：状态；右：成片提示 + 红色加粗提示）
+        top = tk.Frame(self.root, bg=COLOR_PANEL)
+        top.pack(side="top", fill="x")
+
         self.status = tk.Label(
-            self.root, text="", anchor="w", bg=COLOR_PANEL, fg=COLOR_TEXT,
+            top, text="", anchor="w", bg=COLOR_PANEL, fg=COLOR_TEXT,
             padx=10, pady=6, font=("Microsoft YaHei UI", 10))
-        self.status.pack(side="top", fill="x")
+        self.status.pack(side="left", fill="x", expand=True)
+
+        tk.Label(
+            top, text="筛完直接关了就行，已经保存了", anchor="e",
+            bg=COLOR_PANEL, fg="#ff3b30",
+            padx=10, pady=6,
+            font=("Microsoft YaHei UI", 11, "bold")).pack(side="right")
+
+        # 成片提示（根据当前图片是否已成片切换文字与颜色），位于红色提示左侧
+        self.done_hint = tk.Label(
+            top, text="", anchor="e", bg=COLOR_PANEL, fg=COLOR_ADD,
+            padx=10, pady=6, font=("Microsoft YaHei UI", 11, "bold"))
+        self.done_hint.pack(side="right")
 
         # 主体：左列表 + 右看片
         body = tk.Frame(self.root, bg=COLOR_BG)
@@ -367,6 +383,7 @@ class PicchooserGUI:
     def _refresh_status(self):
         if not self.groups:
             self.status.config(text=f"未在 {self.result_dir} 找到可筛选的分组")
+            self.done_hint.config(text="")
             return
         name, files = self.groups[self.group_index]
         cur = files[self.photo_index] if files else ""
@@ -374,6 +391,12 @@ class PicchooserGUI:
         self.status.config(
             text=f"分组：{name}    图片 {self.photo_index + 1}/{len(files)}    "
                  f"{os.path.basename(cur)}{done_mark}")
+
+        # 顶部提示行：已成片显示绿色，未成片显示蓝色
+        if cur in self.done_set:
+            self.done_hint.config(text="已添加至成片，回车取消", fg=COLOR_DONE)
+        else:
+            self.done_hint.config(text="回车以添加此图片至成片", fg=COLOR_ADD)
 
     def _current_photo(self):
         if not self.groups:
