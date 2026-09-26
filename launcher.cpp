@@ -4,6 +4,18 @@
 
 namespace fs = std::filesystem;
 
+// 判断运行环境是否可用：python.exe 存在，且关键依赖（exifread / PIL）已安装
+static bool IsRuntimeReady(const fs::path& runtimeDir)
+{
+    if (!fs::exists(runtimeDir / L"python.exe"))
+        return false;
+    if (!fs::exists(runtimeDir / L"Lib" / L"site-packages" / L"exifread"))
+        return false;
+    if (!fs::exists(runtimeDir / L"Lib" / L"site-packages" / L"PIL"))
+        return false;
+    return true;
+}
+
 int main()
 {
     wchar_t szExePath[MAX_PATH] = { 0 };
@@ -11,20 +23,22 @@ int main()
     fs::path exePath(szExePath);
     fs::path appDir = exePath.parent_path();
 
-    fs::path pythonExe = appDir / L"runtime" / L"pythonw.exe";
+    fs::path runtimeDir = appDir / L"runtime";
+    fs::path pythonExe = runtimeDir / L"python.exe";
     fs::path ps1File = appDir / L"bootstrap_runtime.ps1";
     fs::path mainPy = appDir / L"Picchooser.py";
 
-    if (!fs::exists(pythonExe))
+    // 环境不存在或损坏时，运行引导脚本安装
+    if (!IsRuntimeReady(runtimeDir))
     {
         std::wstring cmd = L"powershell.exe -ExecutionPolicy Bypass -File \"" + ps1File.wstring() + L"\"";
 
         STARTUPINFOW si = { sizeof(si) };
         PROCESS_INFORMATION pi;
         si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
+        si.wShowWindow = SW_SHOW;
 
-        if (!CreateProcessW(NULL, (LPWSTR)cmd.c_str(),
+        if (!CreateProcessW(NULL, &cmd[0],
             NULL, NULL, FALSE, 0, NULL,
             appDir.c_str(), &si, &pi))
         {
@@ -35,20 +49,29 @@ int main()
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
 
-        if (!fs::exists(pythonExe))
+        if (!IsRuntimeReady(runtimeDir))
         {
-            MessageBoxW(NULL, L"运行环境下载失败！请检查网络", L"错误", MB_ICONERROR);
+            MessageBoxW(NULL, L"运行环境安装失败！请检查网络", L"错误", MB_ICONERROR);
             return 1;
         }
     }
 
+    // 设置 tkinter 所需的 Tcl/Tk 库路径（bootstrap 里设的不会传给本进程）
+    SetEnvironmentVariableW(L"TCL_LIBRARY", (runtimeDir / L"tcl" / L"tcl8.6").c_str());
+    SetEnvironmentVariableW(L"TK_LIBRARY", (runtimeDir / L"tcl" / L"k8.6").c_str());
+
+    // 用 python.exe 启动命令行主程序，并分配独立控制台窗口
     std::wstring runCmd = L"\"" + pythonExe.wstring() + L"\" \"" + mainPy.wstring() + L"\"";
     STARTUPINFOW si2 = { sizeof(si2) };
     PROCESS_INFORMATION pi2;
 
-    CreateProcessW(NULL, (LPWSTR)runCmd.c_str(),
-        NULL, NULL, FALSE, 0, NULL,
-        appDir.c_str(), &si2, &pi2);
+    if (!CreateProcessW(NULL, &runCmd[0],
+        NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL,
+        appDir.c_str(), &si2, &pi2))
+    {
+        MessageBoxW(NULL, L"启动主程序失败", L"错误", MB_ICONERROR);
+        return 1;
+    }
 
     CloseHandle(pi2.hThread);
     CloseHandle(pi2.hProcess);

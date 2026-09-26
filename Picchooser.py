@@ -6,6 +6,12 @@ import exifread
 import datetime
 import shutil
 
+# 确保脚本所在目录在 sys.path 中，以便 import 同目录模块（如 PicchooserGUI）。
+# 嵌入式 Python 的 _pth 不会自动加入脚本目录，需手动补充。
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
 
 def get_app_dir():
     """
