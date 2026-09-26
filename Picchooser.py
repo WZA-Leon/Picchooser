@@ -675,9 +675,42 @@ def list_drives():
     return drives
 
 
+def get_quick_access_folders():
+    """
+    获取常用文件夹的快捷入口（桌面、图片、视频、文档、下载等）
+    跨平台：Windows 用 USERPROFILE 下的标准目录；macOS/Linux 用 HOME 下的常见目录
+    :return: [(显示名, 绝对路径), ...]，仅包含真实存在的目录
+    """
+    home = os.path.expanduser("~")
+    if os.name == "nt":
+        candidates = [
+            ("桌面", os.path.join(home, "Desktop")),
+            ("图片", os.path.join(home, "Pictures")),
+            ("视频", os.path.join(home, "Videos")),
+            ("文档", os.path.join(home, "Documents")),
+            ("下载", os.path.join(home, "Downloads")),
+            ("音乐", os.path.join(home, "Music")),
+        ]
+    else:
+        candidates = [
+            ("桌面", os.path.join(home, "Desktop")),
+            ("图片", os.path.join(home, "Pictures")),
+            ("视频", os.path.join(home, "Videos")),
+            ("文档", os.path.join(home, "Documents")),
+            ("下载", os.path.join(home, "Downloads")),
+            ("音乐", os.path.join(home, "Music")),
+        ]
+
+    result = []
+    for name, path in candidates:
+        if os.path.isdir(path):
+            result.append((name, os.path.abspath(path)))
+    return result
+
+
 def choose_folder(start_dir, supported_ext, prompt=input):
     """
-    交互式切换目录：列出当前目录的子文件夹和上级目录，用 1、2、3… 选择
+    交互式切换目录：列出常用文件夹快捷入口、当前目录的子文件夹和上级目录，用 1、2、3… 选择
     选中没有支持的图片的目录后，可继续进入下级文件夹或返回上级
     :param start_dir: 起始目录（当前源目录）
     :param supported_ext: 支持的扩展名序列
@@ -699,13 +732,22 @@ def choose_folder(start_dir, supported_ext, prompt=input):
         if no_supported:
             log_colored("  （该目录及其子目录均没有支持的图片）", "yellow")
 
-        # 收集可选目标：返回上级 + 子文件夹 + 当前目录，按序号对应
+        # 收集可选目标：快捷入口 + 返回上级 + 子文件夹 + 当前目录，按序号对应
         options = []  # 按序号存放可选目录的完整路径
+
+        # 常用文件夹快捷入口（桌面、图片、视频、文档等）
+        quick_folders = get_quick_access_folders()
+        if quick_folders:
+            log_colored("  快捷入口：", "white")
+            for name, path in quick_folders:
+                # 快捷入口用青色高亮，与普通子文件夹区分开
+                log_colored(f"    [{len(options) + 1}] {name}（{path}）", "cyan")
+                options.append(path)
 
         # 上级目录（始终放在第一个位置）；若已是根目录则改为「切换分区」
         parent = os.path.dirname(current)
         if parent and parent != current:
-            log_colored(f"    [1] .. （返回上级目录）", "white")
+            log_colored(f"    [{len(options) + 1}] .. （返回上级目录）", "white")
             options.append(parent)
         else:
             # 已是根目录（Windows 盘符根 / POSIX 的 "/"）：列出其它可切换位置
