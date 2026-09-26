@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "Picchooser"
-#define MyAppVersion "1.2"
+#define MyAppVersion "1.3"
 #define MyAppPublisher "魏子昂软件工作室"
 #define MyAppURL "https://github.com/WZA-Leon/Picchooser"
 #define MyAppExeName "picc.exe"
@@ -22,7 +22,7 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
-DefaultDirName={autopf}\{#MyAppName}
+DefaultDirName={localappdata}\{#MyAppName}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 ; "ArchitecturesAllowed=x64compatible" specifies that Setup cannot run
 ; on anything but x64 and Windows 11 on Arm.
@@ -35,8 +35,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ChangesAssociations=yes
 DisableProgramGroupPage=yes
 LicenseFile=.\LICENSE
-; Uncomment the following line to run in non administrative install mode (install for current user only).
-;PrivilegesRequired=lowest
+; 安装到用户 AppData，无需管理员权限（仅当前用户）
+PrivilegesRequired=lowest
 OutputDir=.\dist
 OutputBaseFilename=piccsetup
 SetupIconFile=.\icon.ico
@@ -51,7 +51,18 @@ Name: "simplechinese"; MessagesFile: "compiler:Languages\Simple Chinese.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
+; 启动器（C++ 编译产物，负责首次运行时下载嵌入式运行时并启动主程序）
 Source: "{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; 运行时引导脚本（首次运行下载 Python 嵌入式运行时 + 安装依赖 + 配置 Tkinter）
+Source: "bootstrap_runtime.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "bootstrap_runtime.bat"; DestDir: "{app}"; Flags: ignoreversion
+; 嵌入式运行时（含提取好的 tkinter 组件；首次运行若缺失会由引导脚本下载补齐）
+Source: "runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 程序源码（由嵌入式运行时解释执行，无需 PyInstaller 打包）
+Source: "Picchooser.py"; DestDir: "{app}"; Flags: ignoreversion
+Source: "PicchooserGUI.py"; DestDir: "{app}"; Flags: ignoreversion
+; 原生缩略图 DLL（GUI 用；缺失时 GUI 会自动回退到 Pillow 缩放）
+Source: "thumbnail\thumbnail.dll"; DestDir: "{app}\thumbnail"; Flags: ignoreversion
 Source: "photo_config.json"; DestDir: "{app}"; Flags: ignoreversion
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
@@ -60,8 +71,8 @@ Root: HKA; Subkey: "Software\Classes\{#MyAppAssocExt}\OpenWithProgids"; ValueTyp
 Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssocName}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
 Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
-; 安装时把安装目录加入系统 PATH（卸载时自动移除）
-Root: HKLM; Subkey: "SYSTEM\CurrentControlSet\Control\Session Manager\Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}')
+; 安装时把安装目录加入用户 PATH（卸载时自动移除）
+Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Check: NeedsAddPath('{app}')
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -72,7 +83,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 
 [Code]
 const
-  EnvironmentKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+  EnvironmentKey = 'Environment';
   WM_SETTINGCHANGE = $001A;
   SMTO_ABORTIFHUNG = $0002;
 
@@ -95,8 +106,8 @@ var
   SepPos: Integer;
   Target: string;
 begin
-  Result := False;
-  if not RegQueryStringValue(HKLM, EnvironmentKey, 'Path', PathValue) then
+    Result := False;
+  if not RegQueryStringValue(HKCU, EnvironmentKey, 'Path', PathValue) then
     Exit;
 
   { 去掉结尾反斜杠后比较，避免 "C:\App" 与 "C:\App\" 被当成两个目录 }

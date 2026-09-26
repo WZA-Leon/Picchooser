@@ -10,8 +10,7 @@
     * 下方：当前分组内其它图片的缩略图条。
 - 交互：
     * 回车：把当前图片复制到「成片」文件夹并标绿；再次回车取消（删除副本）。
-    * 滚轮 / 左右方向键：切换当前图片。
-
+    * 左右方向键：切换当前图片。
 「分类结果」目录的确定顺序：
     1. 显式参数（供 Picchooser.py 菜单调用）
     2. 命令行参数
@@ -302,7 +301,7 @@ class PicchooserGUI:
         self.thumb_canvas.configure(xscrollcommand=self.thumb_scroll.set)
 
         # 底部提示
-        hint = ("↑ ↓ 切换分组    ← → / 滚轮 切换图片    "
+        hint = ("↑ ↓ 切换分组    ← → 切换图片    "
                 "回车 选为成片 / 取消    成片目录：" + DONE_FOLDER_NAME)
         tk.Label(self.root, text=hint, anchor="w", bg=COLOR_PANEL,
                  fg=COLOR_TEXT_DIM, padx=10, pady=4,
@@ -315,10 +314,6 @@ class PicchooserGUI:
         self.root.bind("<Right>", lambda e: self._switch_photo(1))
         self.root.bind("<Return>", lambda e: self._toggle_done())
         self.root.bind("<KP_Enter>", lambda e: self._toggle_done())
-        # 滚轮切换图片
-        self.root.bind("<MouseWheel>", self._on_wheel)
-        self.main_canvas.bind("<MouseWheel>", self._on_wheel)
-        self.thumb_canvas.bind("<MouseWheel>", self._on_wheel)
 
     # ---------------- 数据加载 ----------------
 
@@ -562,10 +557,6 @@ class PicchooserGUI:
             self._refresh_status()
             self._render_main()
             self._render_thumb_bar()
-
-    def _on_wheel(self, event):
-        # Windows: event.delta 正=上滚，负=下滚
-        self._switch_photo(-1 if event.delta > 0 else 1)
 
     def _toggle_done(self):
         """回车：选为成片（复制并标绿）或取消（删除副本）。"""
