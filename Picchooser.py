@@ -772,7 +772,7 @@ def choose_folder(start_dir, supported_ext, prompt=input):
 
 def ask_mode(default_copy=True, prompt=input, on_edit=None,
              source_dir=None, supported_ext=(), on_change_dir=None,
-             on_tutorial=None):
+             on_tutorial=None, on_gui=None):
     """
     程序开始时询问用户采用哪种处理方式；可选择进入「修改配置」「切换目录」或「软件教程」
     :param default_copy: 直接回车时采用的默认值（True=复制，False=移动）
@@ -782,6 +782,7 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
     :param supported_ext: 支持的扩展名序列，用于判断目录内是否有图片
     :param on_change_dir: 选择 [4] 切换目录时调用的回调，返回后重新询问；为 None 时不显示该选项
     :param on_tutorial: 选择 [5] 软件教程时调用的回调，返回后重新询问；为 None 时不显示该选项
+    :param on_gui: 选择 [6] 精细筛片（GUI）时调用的回调，返回后重新询问；为 None 时不显示该选项
     :return: True=复制原图；False=移动原图；None=用户选择退出
     """
     default_hint = "复制" if default_copy else "移动"
@@ -817,6 +818,9 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
         if on_tutorial is not None:
             menu += colorize("  [5] 软件教程", "white") + "\n"
             valid_choices.append("5")
+        if on_gui is not None:
+            menu += colorize("  [6] 精细筛片（图形界面）", "white") + "\n"
+            valid_choices.append("6")
         menu += colorize("  [0] 退出", "white") + "\n"
         valid_choices.append("0")
         tail = "请输入 " + " / ".join(valid_choices)
@@ -858,6 +862,9 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
             continue
         if answer == "5" and on_tutorial is not None:
             on_tutorial()
+            continue
+        if answer == "6" and on_gui is not None:
+            on_gui()
             continue
         log(f"输入无效，请输入 {tail.replace('请输入 ', '')}，或直接回车使用默认值。")
         pause_before_exit(prompt)
@@ -985,6 +992,21 @@ def main(config_path=CONFIG_FILE, prompt=input):
             """选择 [5] 软件教程：显示使用说明，回车后返回主菜单"""
             show_tutorial(config, prompt)
 
+        def on_gui():
+            """选择 [6] 精细筛片：启动图形界面（PicchooserGUI），关闭后返回主菜单"""
+            try:
+                import PicchooserGUI
+            except ImportError as e:
+                log_colored(f"[错误] 无法加载图形界面模块：{describe_error(e)}", "red")
+                log("[提示] 请确认 PicchooserGUI.py 与本程序在同一目录，且已安装 Pillow")
+                wait_for_enter(prompt)
+                return
+            try:
+                PicchooserGUI.run_gui()
+            except Exception as e:
+                log_colored(f"[错误] 图形界面运行出错：{describe_error(e)}", "red")
+                wait_for_enter(prompt)
+
         # 主循环：切换目录/修改配置后会重新询问；分类完成后回到菜单再次询问
         while True:
             mode = ask_mode(
@@ -993,6 +1015,7 @@ def main(config_path=CONFIG_FILE, prompt=input):
                 supported_ext=config["supported_ext"],
                 on_change_dir=on_change_dir,
                 on_tutorial=on_tutorial,
+                on_gui=on_gui,
             )
             if mode is None:
                 # 用户选择 [0] 退出
