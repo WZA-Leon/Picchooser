@@ -850,7 +850,11 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
             # 返回后回到循环头部，会先清屏再重新显示主菜单
             continue
         if answer == "4" and on_change_dir is not None:
-            on_change_dir()
+            # 切换目录回调返回新目录时，同步更新本地 source_dir，
+            # 使主菜单「当前操作目录」立即刷新（无需重启程序）
+            new_dir = on_change_dir()
+            if new_dir:
+                source_dir = new_dir
             continue
         if answer == "5" and on_tutorial is not None:
             on_tutorial()
@@ -960,12 +964,14 @@ def main(config_path=CONFIG_FILE, prompt=input):
             config.update(load_config(config_path))
 
         def on_change_dir():
-            """选择 [4] 切换目录：进入文件夹选择菜单，选中后更新配置并保存"""
+            """选择 [4] 切换目录：进入文件夹选择菜单，选中后更新配置并保存
+            :return: 切换后的新目录绝对路径；用户取消则返回 None
+            """
             new_dir = choose_folder(
                 get_source_dir(config), config["supported_ext"], prompt
             )
             if not new_dir:
-                return
+                return None
             config["source_folder"] = new_dir
             try:
                 save_config(config, config_path)
@@ -973,6 +979,7 @@ def main(config_path=CONFIG_FILE, prompt=input):
                 log("[完成] 已保存至配置文件，下次启动时自动切换到当前目录")
             except OSError as e:
                 log(f"[错误] 保存配置失败：{describe_error(e)}")
+            return new_dir
 
         def on_tutorial():
             """选择 [5] 软件教程：显示使用说明，回车后返回主菜单"""
