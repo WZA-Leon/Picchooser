@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """Picchooser 精细筛片 GUI。
 
-在分类结果目录（dest_folder 或源目录）下，把各分类子文件夹（连拍1、连拍2、
-孤立照片、无拍摄信息 …）作为左侧分组列表，右侧大图 + 缩略图条浏览，
-人工挑选「成片」：
+本程序独立运行，不读取 photo_config.json。它把「分类结果」目录下的各分类
+子文件夹（连拍1、连拍2、孤立照片、无拍摄信息 …）作为左侧分组列表，
+右侧大图 + 缩略图条浏览，人工挑选「成片」：
 
 - 左侧列表区（占 1/5）：显示各分组，左右方向键切换分组。
 - 右侧看片区（占 4/5）：
@@ -13,15 +13,18 @@
     * 回车：把当前图片复制到「成片」文件夹并标绿；再次回车取消（删除副本）。
     * 滚轮 / 上下方向键：切换当前图片。
 
+「分类结果」目录的确定方式：命令行参数优先，否则用本脚本所在目录。
+程序会识别该目录下是否存在含受支持图片的分类子文件夹；若没有则弹窗提示。
+「成片」文件夹输出在「分类结果」目录下。
+
 缩略图通过 C++ DLL（thumbnail/thumbnail.dll）调用 Windows Shell 的
 IShellItemImageFactory 接口获取；DLL 缺失时自动回退到 Pillow 缩放。
 
 运行：
-    uv run python PicchooserGUI.py
+    uv run python PicchooserGUI.py [分类结果目录]
 """
 
 import ctypes
-import json
 import os
 import shutil
 import sys
@@ -34,7 +37,6 @@ from PIL import Image, ImageTk
 # 常量
 # ---------------------------------------------------------------------------
 
-CONFIG_FILE = "photo_config.json"
 DLL_NAME = "thumbnail.dll"
 DLL_SUBDIR = "thumbnail"          # DLL 相对本脚本的存放子目录
 DONE_FOLDER_NAME = "成片"          # 成片输出文件夹名
@@ -54,9 +56,9 @@ COLOR_THUMB_SEL = "#007acc"
 THUMB_SIZE = 96                   # 缩略图边长（像素）
 THUMB_PAD = 6
 
-# 支持的图片扩展名（读取配置，失败时用默认）
-DEFAULT_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff",
-                ".webp", ".JPG", ".JPEG", ".PNG", ".BMP")
+# 支持的图片扩展名（本程序独立使用，不读取配置文件）
+SUPPORTED_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff",
+                  ".webp", ".heic", ".heif", ".avif", ".jfif", ".ico")
 
 
 # ---------------------------------------------------------------------------
@@ -148,16 +150,15 @@ class ThumbnailProvider:
 # ---------------------------------------------------------------------------
 
 class PicchooserGUI:
-    def __init__(self, root):
+    def __init__(self, root, result_dir=None):
         self.root = root
         self.root.title("Picchooser 精细筛片")
         self.root.configure(bg=COLOR_BG)
         self.root.geometry("1200x760")
         self.root.minsize(900, 600)
 
-        self.config = self._load_config()
-        self.exts = tuple(self.config.get("supported_ext") or DEFAULT_EXTS)
-        self.result_dir = self._resolve_result_dir()
+        self.exts = SUPPORTED_EXTS
+        self.result_dir = self._resolve_result_dir(result_dir)
         self.done_dir = os.path.join(self.result_dir, DONE_FOLDER_NAME)
 
         self.thumbs = ThumbnailProvider()
@@ -174,31 +175,31 @@ class PicchooserGUI:
         self._thumb_widgets = []
 
         self._build_ui()
-        self._load_groups()
+        found = self._load_groups()
         self._bind_keys()
         self._refresh_all()
 
-    # ---------------- 配置与目录 ----------------
+        # 未识别到已分好类的子文件夹时弹窗提示
+        if not found:
+            self.root.after(100, self._warn_no_groups)
 
-    def _load_config(self):
-        base = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(base, CONFIG_FILE)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return {}
+    def _warn_no_groups(self):
+        """未在分类结果目录下识别到已分好类的子文件夹时提示。"""
+        messagebox.showwarning(
+            "未找到分类结果",
+            f"未在以下目录识别到已分好类的子文件夹：\n{self.result_dir}\n\n"
+            f"请先运行 Picchooser 完成照片分类，"
+            f"或确认「分类结果」目录下存在连拍 / 孤立照片等分类文件夹。")
 
-    def _resolve_result_dir(self):
-        """分类结果目录：dest_folder 优先，否则源目录。"""
-        base = os.path.dirname(os.path.abspath(__file__))
-        dest = self.config.get("dest_folder")
-        if dest:
-            return os.path.abspath(dest)
-        src = self.config.get("source_folder") or "."
-        if src in (".", ""):
-            return base
-        return os.path.abspath(src)
+    # ---------------- 目录 ----------------
+
+    def _resolve_result_dir(self, result_dir=None):
+        """分类结果目录：显式参数优先，其次命令行参数，否则脚本所在目录。"""
+        if result_dir:
+            return os.path.abspath(result_dir)
+        if len(sys.argv) > 1 and sys.argv[1].strip():
+            return os.path.abspath(sys.argv[1])
+        return os.path.dirname(os.path.abspath(__file__))
 
     # ---------------- 界面构建 ----------------
 
@@ -274,14 +275,17 @@ class PicchooserGUI:
     # ---------------- 数据加载 ----------------
 
     def _load_groups(self):
-        """扫描分类结果目录下的子文件夹作为分组。"""
+        """扫描分类结果目录下的子文件夹作为分组。
+
+        返回是否成功识别到已分好类的子文件夹（含受支持图片）。
+        """
         self.groups = []
         if not os.path.isdir(self.result_dir):
-            return
+            return False
         try:
             entries = sorted(os.listdir(self.result_dir))
         except OSError:
-            return
+            return False
 
         for name in entries:
             full = os.path.join(self.result_dir, name)
@@ -298,6 +302,8 @@ class PicchooserGUI:
         if os.path.isdir(self.done_dir):
             for name in os.listdir(self.done_dir):
                 self.done_set.add(os.path.join(self.done_dir, name))
+
+        return bool(self.groups)
 
     def _list_images(self, folder):
         files = []
@@ -546,10 +552,14 @@ class PicchooserGUI:
         self.done_set.discard(path)
 
 
-def run_gui():
-    """启动图形界面（阻塞直到窗口关闭）。供 Picchooser.py 菜单调用。"""
+def run_gui(result_dir=None):
+    """启动图形界面（阻塞直到窗口关闭）。供 Picchooser.py 菜单调用。
+
+    result_dir：分类结果目录；为 None 时由 PicchooserGUI 自行解析
+    （命令行参数优先，否则脚本所在目录）。
+    """
     root = tk.Tk()
-    app = PicchooserGUI(root)
+    app = PicchooserGUI(root, result_dir=result_dir)
     if not app.thumbs.available:
         # 提示 DLL 未加载，但程序仍可用 Pillow 回退
         app.status.config(
