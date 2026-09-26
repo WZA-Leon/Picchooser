@@ -606,7 +606,7 @@ def has_supported_files(dir_path, supported_ext, max_depth=3):
         return True
     if max_depth <= 1:
         return False
-    for folder in list_subfolders(dir_path):
+    for _name, folder, _is_lnk in list_subfolders(dir_path):
         if has_supported_files(folder, supported_ext, max_depth - 1):
             return True
     return False
@@ -617,19 +617,171 @@ def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 
+def resolve_lnk_target(lnk_path):
+    """
+    解析 Windows 快捷方式（.lnk）指向的真实目标路径。
+    通过 ctypes 调用 Shell 的 IShellLinkW 接口，无需额外依赖（pywin32）。
+    :param lnk_path: .lnk 文件完整路径
+    :return: 目标绝对路径；解析失败或非 Windows 返回 None
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        # ---- 定义所需 COM 接口（只声明用到的方法，顺序必须与 vtable 一致）----
+        class GUID(ctypes.Structure):
+            _fields_ = [
+                ("Data1", wintypes.DWORD),
+                ("Data2", wintypes.WORD),
+                ("Data3", wintypes.WORD),
+                ("Data4", ctypes.c_ubyte * 8),
+            ]
+
+                # 接口指针统一用 c_void_p 表示（避免 ctypes 对 POINTER(结构体) 做类型校验）
+        # IShellLinkW 的 vtable：IUnknown(3) + 若干方法，GetPath 是第 3 个业务方法
+        LPFN_GETPATH = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p,
+            wintypes.LPWSTR, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+        )
+        LPFN_QUERYINTERFACE = ctypes.WINFUNCTYPE(
+            ctypes.c_long, ctypes.c_void_p,
+            ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p),
+        )
+        LPFN_RELEASE = ctypes.WINFUNCTYPE(
+            ctypes.c_ulong, ctypes.c_void_p,
+        )
+
+        # CLSID_ShellLink = {00021401-0000-0000-C000-000000000046}
+        clsid_shell_link = GUID(
+            0x00021401, 0x0000, 0x0000,
+            (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46),
+        )
+        # IID_IShellLinkW = {000214F9-0000-0000-C000-000000000046}
+        iid_shell_link = GUID(
+            0x000214F9, 0x0000, 0x0000,
+            (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46),
+        )
+        # IID_IPersistFile = {0000010B-0000-0000-C000-000000000046}
+        iid_persist_file = GUID(
+            0x0000010B, 0x0000, 0x0000,
+            (ctypes.c_ubyte * 8)(0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46),
+        )
+
+        ole32 = ctypes.windll.ole32
+        # 显式声明原型：否则 64 位下指针参数会被当成 c_int 截断，导致调用失败
+        ole32.CoInitialize.argtypes = [ctypes.c_void_p]
+        ole32.CoInitialize.restype = ctypes.c_long
+        ole32.CoCreateInstance.argtypes = [
+            ctypes.POINTER(GUID), ctypes.c_void_p, wintypes.DWORD,
+            ctypes.POINTER(GUID), ctypes.POINTER(ctypes.c_void_p),
+        ]
+        ole32.CoCreateInstance.restype = ctypes.c_long
+
+        # 初始化 COM（STA）；已初始化会返回 S_FALSE，忽略即可
+        ole32.CoInitialize(None)
+
+        shell_link = ctypes.c_void_p()
+        hr = ole32.CoCreateInstance(
+            ctypes.byref(clsid_shell_link), None, 1,  # CLSCTX_INPROC_SERVER = 1
+            ctypes.byref(iid_shell_link), ctypes.byref(shell_link),
+        )
+        if hr != 0 or not shell_link:
+            return None
+
+        try:
+            # 通过 vtable 取 QueryInterface（索引 0）与 Release（索引 2）
+            vtable = ctypes.cast(
+                shell_link, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+            ).contents
+            query_interface = LPFN_QUERYINTERFACE(vtable[0])
+            release = LPFN_RELEASE(vtable[2])
+
+            persist_file = ctypes.c_void_p()
+            hr = query_interface(
+                shell_link, ctypes.byref(iid_persist_file),
+                ctypes.byref(persist_file),
+            )
+            if hr != 0 or not persist_file:
+                return None
+
+            try:
+                # IPersistFile::Load 是 vtable 索引 5（IUnknown 3 + GetClassID 1 + IsDirty 1）
+                pf_vtable = ctypes.cast(
+                    persist_file, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+                ).contents
+                LPFN_LOAD = ctypes.WINFUNCTYPE(
+                    ctypes.c_long, ctypes.c_void_p,
+                    wintypes.LPWSTR, wintypes.DWORD,
+                )
+                load = LPFN_LOAD(pf_vtable[5])
+                # STGM_READ = 0
+                hr = load(persist_file, lnk_path, 0)
+                if hr != 0:
+                    return None
+
+                # IShellLinkW::GetPath 是 vtable 索引 3（IUnknown 3 之后第一个）
+                sl_vtable = ctypes.cast(
+                    shell_link, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+                ).contents
+                get_path = LPFN_GETPATH(sl_vtable[3])
+
+                buf = ctypes.create_unicode_buffer(32768)  # MAX_PATH 足够，留足余量
+                # SLGP_UNCPRIORITY = 0x0002，优先返回 UNC 路径
+                hr = get_path(shell_link, buf, len(buf), None, 0x0002)
+                if hr != 0 or not buf.value:
+                    return None
+                return os.path.abspath(buf.value)
+            finally:
+                pf_vtable = ctypes.cast(
+                    persist_file, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+                ).contents
+                LPFN_RELEASE(pf_vtable[2])(persist_file)
+        finally:
+            vtable = ctypes.cast(
+                shell_link, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p))
+            ).contents
+            LPFN_RELEASE(vtable[2])(shell_link)
+    except Exception:
+        # 任何解析异常都视为「无法解析」，不影响主流程
+        return None
+
+
 def list_subfolders(dir_path):
     """
-    列出目录下的子文件夹（按名称排序），用于「选择文件夹」菜单
+    列出目录下的子文件夹（按名称排序），用于「选择文件夹」菜单。
+    同时解析指向文件夹的 Windows 快捷方式（.lnk），把其目标目录也一并列出。
+    快捷方式作为独立入口保留（即使其目标与某个真实子目录相同），
+    并以其自身文件名作为显示名，便于用户按快捷方式名识别。
     :param dir_path: 目录路径
-    :return: 子文件夹完整路径列表；不可读时返回空列表
+    :return: [(显示名, 完整路径, 是否快捷方式), ...]；不可读时返回空列表
     """
     try:
         entries = os.listdir(dir_path)
     except OSError:
         return []
-    folders = [os.path.join(dir_path, name) for name in entries
-               if os.path.isdir(os.path.join(dir_path, name))]
-    folders.sort(key=lambda p: os.path.basename(p).lower())
+    folders = []
+    seen_dirs = set()   # 真实子目录去重（避免重复项）
+    for name in entries:
+        full = os.path.join(dir_path, name)
+        if os.path.isdir(full):
+            key = os.path.normcase(os.path.abspath(full))
+            if key in seen_dirs:
+                continue
+            seen_dirs.add(key)
+            folders.append((name, full, False))
+        elif name.lower().endswith(".lnk"):
+            # 快捷方式：解析其指向的目标，仅当目标是目录时才纳入
+            resolved = resolve_lnk_target(full)
+            if not resolved or not os.path.isdir(resolved):
+                continue
+            # 显示名去掉 .lnk 后缀，用快捷方式自己的名字
+            display = name[:-4] if name.lower().endswith(".lnk") else name
+            folders.append((display, resolved, True))
+        else:
+            continue
+    folders.sort(key=lambda item: item[0].lower())
     return folders
 
 
@@ -698,13 +850,18 @@ def get_quick_access_folders():
             ("视频", os.path.join(home, "Videos")),
             ("文档", os.path.join(home, "Documents")),
             ("下载", os.path.join(home, "Downloads")),
-            ("音乐", os.path.join(home, "Music")),
+                        ("音乐", os.path.join(home, "Music")),
         ]
 
     result = []
     for name, path in candidates:
         if os.path.isdir(path):
             result.append((name, os.path.abspath(path)))
+        elif os.path.isfile(path + ".lnk"):
+            # 该常用目录本身是个快捷方式（.lnk）：解析其目标
+            resolved = resolve_lnk_target(path + ".lnk")
+            if resolved and os.path.isdir(resolved):
+                result.append((name, resolved))
     return result
 
 
@@ -760,19 +917,23 @@ def choose_folder(start_dir, supported_ext, prompt=input):
                     log_colored(f"    [{len(options) + 1}] {drive}", "cyan")
                     options.append(drive)
 
-        # 子文件夹：含支持图片的用绿色高亮，不含的用白色并加标记
+                # 子文件夹：含支持图片的用绿色高亮，不含的用白色并加标记；
+        # 快捷方式（.lnk）用蓝色高亮，并显示其指向的目标路径
         log_colored("  子文件夹：", "white")
         subfolders = list_subfolders(current)
         if subfolders:
-            for folder in subfolders:
+            for name, folder, is_lnk in subfolders:
                 # 递归（最多 3 层）判断该子文件夹内是否有支持的图片
                 if has_supported_files(folder, supported_ext, max_depth=2):
                     mark = ""
-                    color = "green"
                 else:
                     mark = "（无支持图片）"
-                    color = "white"
-                log_colored(f"    [{len(options) + 1}] {os.path.basename(folder)} {mark}", color)
+                if is_lnk:
+                    # 快捷方式：青色高亮，显示快捷方式名 + 目标路径
+                    log_colored(f"    [{len(options) + 1}] {name} → {folder} {mark}", "cyan")
+                else:
+                    color = "green" if not mark else "white"
+                    log_colored(f"    [{len(options) + 1}] {name} {mark}", color)
                 options.append(folder)
         else:
             log_colored("    （没有子文件夹）", "white")
