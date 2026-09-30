@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import errno
+import webbrowser
 import exifread
 import datetime
 import shutil
@@ -30,7 +31,7 @@ def get_resource_path(filename):
     获取随程序分发的资源文件（如教程 txt）的完整路径
     打包为单文件 exe 时，资源会被解包到 sys._MEIPASS 临时目录；
     源码运行时直接取脚本所在目录。
-    :param filename: 资源文件名，如 "tutorial.txt"
+    :param filename: 资源文件名，如 "tutorial.html"
     :return: 资源文件完整路径
     """
     if getattr(sys, 'frozen', False):
@@ -1004,7 +1005,7 @@ def choose_folder(start_dir, supported_ext, prompt=input):
 
 def ask_mode(default_copy=True, prompt=input, on_edit=None,
              source_dir=None, supported_ext=(), on_change_dir=None,
-             on_tutorial=None, on_gui=None):
+             on_tutorial=None, on_gui=None, on_clear_cache=None):
     """
     程序开始时询问用户采用哪种处理方式；可选择进入「修改配置」「切换目录」或「软件教程」
     :param default_copy: 直接回车时采用的默认值（True=复制，False=移动）
@@ -1015,6 +1016,7 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
     :param on_change_dir: 选择 [4] 切换目录时调用的回调，返回后重新询问；为 None 时不显示该选项
     :param on_tutorial: 选择 [5] 软件教程时调用的回调，返回后重新询问；为 None 时不显示该选项
     :param on_gui: 选择 [6] 精细筛片（GUI）时调用的回调，返回后重新询问；为 None 时不显示该选项
+    :param on_clear_cache: 选择 [7] 清理缓存时调用的回调，返回后重新询问；为 None 时不显示该选项
     :return: True=复制原图；False=移动原图；None=用户选择退出
     """
     default_hint = "复制" if default_copy else "移动"
@@ -1053,6 +1055,9 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
         if on_gui is not None:
             menu += colorize("  [6] 精细筛片（图形界面）", "white") + "\n"
             valid_choices.append("6")
+        if on_clear_cache is not None:
+            menu += colorize("  [7] 清理缓存", "white") + "\n"
+            valid_choices.append("7")
         menu += colorize("  [0] 退出", "white") + "\n"
         valid_choices.append("0")
         tail = "请输入 " + " / ".join(valid_choices)
@@ -1098,6 +1103,9 @@ def ask_mode(default_copy=True, prompt=input, on_edit=None,
         if answer == "6" and on_gui is not None:
             on_gui()
             continue
+        if answer == "7" and on_clear_cache is not None:
+            on_clear_cache()
+            continue
         log(f"输入无效，请输入 {tail.replace('请输入 ', '')}，或直接回车使用默认值。")
         pause_before_exit(prompt)
 
@@ -1112,26 +1120,16 @@ class SafeFormatDict(dict):
 
 def show_tutorial(config, prompt=input):
     """
-    显示「软件教程」：从 tutorial.txt 逐行读取内容并打印，回车后返回主菜单
-    :param config: 当前配置字典，用于填充教程里的动态占位符（源目录等）
+    显示「软件教程」：用系统默认浏览器打开 tutorial.html，回车后返回主菜单
+    :param config: 当前配置字典（保留参数以兼容调用方）
     :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
     """
     clear_screen()
 
-    tutorial_path = get_resource_path("tutorial.txt")
-    # 占位符替换用的值；未在模板中出现的键无所谓，缺失的键用空串兜底
-    fields = {
-        "source_dir": get_source_dir(config),
-        "copy_mode": "复制" if config.get("copy_mode", True) else "移动",
-        "burst_threshold": config.get("burst_threshold"),
-        "supported_ext": "、".join(config.get("supported_ext", [])),
-    }
+    tutorial_path = get_resource_path("tutorial.html")
 
-    try:
-        with open(tutorial_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError as e:
-        log_colored(f"[错误] 无法读取教程文件：{describe_error(e)}", "red")
+    if not os.path.exists(tutorial_path):
+        log_colored(f"[错误] 未找到教程文件：{tutorial_path}", "red")
         try:
             prompt("按回车键返回主菜单...")
         except EOFError:
@@ -1139,15 +1137,13 @@ def show_tutorial(config, prompt=input):
         clear_screen()
         return
 
-    for line in lines:
-        # 去掉行尾换行符；用 format_map 替换 {xxx} 占位符，未知字段保持原样
-        text = line.rstrip("\n")
-        text = text.format_map(SafeFormatDict(fields))
-        # 标题行（带 ===== 或 【】）用青色高亮，其余原样输出
-        if text.startswith("=====") or (text.startswith("【") and text.endswith("】")):
-            log_colored(text, "cyan")
-        else:
-            log(text)
+    try:
+        # 用系统默认浏览器打开本地 HTML 教程页面
+        url = "file:///" + os.path.abspath(tutorial_path).replace("\\", "/")
+        webbrowser.open(url)
+        log_colored("[提示] 已在浏览器中打开软件教程。", "cyan")
+    except Exception as e:
+        log_colored(f"[错误] 无法打开教程页面：{describe_error(e)}", "red")
 
     log("")
     try:
@@ -1156,6 +1152,8 @@ def show_tutorial(config, prompt=input):
         # 非交互环境：无需等待，直接返回
         pass
     clear_screen()
+
+
 
 
 def wait_for_enter(prompt=input):

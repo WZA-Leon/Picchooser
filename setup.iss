@@ -67,7 +67,7 @@ Source: "photo_config.json"; DestDir: "{app}"; Flags: ignoreversion
 ; 程序图标（GUI 窗口图标等运行时使用）
 Source: "icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 ; 软件教程文本（主程序 [5] 软件教程 读取）
-Source: "tutorial.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "tutorial.html"; DestDir: "{app}"; Flags: ignoreversion
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
 [Registry]

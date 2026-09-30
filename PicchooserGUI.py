@@ -27,11 +27,13 @@ IShellItemImageFactory 接口获取；DLL 缺失时自动回退到 Pillow 缩放
 """
 
 import ctypes
+import hashlib
 import json
 import os
 import shutil
 import sys
 import tkinter as tk
+from collections import OrderedDict
 from tkinter import messagebox
 
 from PIL import Image, ImageTk
@@ -60,6 +62,11 @@ COLOR_THUMB_SEL = "#007acc"
 # 缩略图条尺寸
 THUMB_SIZE = 96                   # 缩略图边长（像素）
 THUMB_PAD = 6
+
+# 磁盘缩略图缓存
+TEMP_DIR_NAME = "temp"            # 缩略图缓存目录（位于分类结果目录下）
+CACHE_VERSION = "v1"              # 缓存格式版本，改动缓存逻辑时递增以作废旧缓存
+MAIN_CACHE_MAX = 8                # 大图内存缓存上限（LRU）
 
 # 支持的图片扩展名（本程序独立使用，不读取配置文件）
 SUPPORTED_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff",
@@ -165,6 +172,7 @@ class PicchooserGUI:
         self.exts = SUPPORTED_EXTS
         self.result_dir = self._resolve_result_dir(result_dir)
         self.done_dir = os.path.join(self.result_dir, DONE_FOLDER_NAME)
+        self.temp_dir = os.path.join(self.result_dir, TEMP_DIR_NAME)
 
         self.thumbs = ThumbnailProvider()
 
@@ -178,6 +186,15 @@ class PicchooserGUI:
         self._main_photo = None
         self._thumb_photos = []
         self._thumb_widgets = []
+
+        # 缩略图缓存：内存（不设上限，单张很小）+ 磁盘（temp 目录）
+        self._thumb_cache = {}            # {(path, size): PIL.Image}
+        self._main_cache = OrderedDict()  # 大图 LRU 缓存
+
+        # 异步渲染任务队列（按优先级调度，避免大组卡顿）
+        self._render_gen = 0              # 代次，切组时 +1 作废旧任务
+        self._task_queue = []             # [(priority, callable), ...]
+        self._task_running = False
 
         self._build_ui()
         found = self._load_groups()
@@ -361,10 +378,64 @@ class PicchooserGUI:
     # ---------------- 渲染 ----------------
 
     def _refresh_all(self):
+        """切组时按优先级刷新：焦点大图 → 图片条 → 预取其它。"""
+        self._render_gen += 1          # 作废旧任务
+        self._task_queue.clear()
         self._refresh_group_list()
         self._refresh_status()
-        self._render_main()
-        self._render_thumb_bar()
+        self._render_main()            # 步骤 1：焦点大图（同步，立即显示）
+        self._render_thumb_bar()       # 步骤 2：底部图片条（先占位，异步填充）
+        self._prefetch_others()        # 步骤 3/4：预取本组大图 + 相邻组缩略图
+
+    # ---------------- 异步任务调度 ----------------
+
+    def _schedule(self, priority, fn):
+        """把任务按优先级插入队列（数字越小越先执行）。"""
+        self._task_queue.append((priority, fn))
+        self._task_queue.sort(key=lambda t: t[0])
+        if not self._task_running:
+            self._task_running = True
+            self.root.after(1, self._run_tasks)
+
+    def _run_tasks(self):
+        """每次执行一个任务，然后让出事件循环，避免界面冻结。"""
+        if not self._task_queue:
+            self._task_running = False
+            return
+        _, fn = self._task_queue.pop(0)
+        try:
+            fn()
+        except Exception:
+            pass
+        self.root.after(1, self._run_tasks)
+
+    def _prefetch_others(self):
+        """步骤 3/4：后台预取本组其它大图与相邻组缩略图（低优先级）。"""
+        gen = self._render_gen
+        _, files = self.groups[self.group_index]
+        cw = max(self.main_canvas.winfo_width(), 1)
+        ch = max(self.main_canvas.winfo_height(), 1)
+        big = max(cw, ch)
+
+        # 步骤 3：本组其它图片的大缩略图
+        for path in files:
+            if (path, big) not in self._thumb_cache:
+                self._schedule(3, lambda p=path, s=big, g=gen:
+                               self._prefetch_one(p, s, g))
+
+        # 步骤 4：相邻组的缩略图条
+        for gi in (self.group_index - 1, self.group_index + 1):
+            if 0 <= gi < len(self.groups):
+                for path in self.groups[gi][1]:
+                    if (path, THUMB_SIZE) not in self._thumb_cache:
+                        self._schedule(4, lambda p=path, g=gen:
+                                       self._prefetch_one(p, THUMB_SIZE, g))
+
+    def _prefetch_one(self, path, size, gen):
+        """只填缓存，不渲染。"""
+        if gen != self._render_gen:
+            return
+        self._get_thumb(path, size)
 
     def _refresh_group_list(self):
         self.group_list.delete(0, tk.END)
@@ -417,12 +488,8 @@ class PicchooserGUI:
         cw = max(self.main_canvas.winfo_width(), 1)
         ch = max(self.main_canvas.winfo_height(), 1)
 
-        # 优先用 DLL 缩略图（大尺寸），失败回退 Pillow
-        img = None
-        if self.thumbs.available:
-            img = self.thumbs.get(path, max(cw, ch))
-        if img is None:
-            img = self._load_with_pillow(path)
+        # 优先用缓存 / DLL 缩略图（大尺寸），失败回退 Pillow
+        img = self._get_main(path, max(cw, ch))
         if img is None:
             self.main_canvas.create_text(
                 cw // 2, ch // 2, text="无法加载图片", fill=COLOR_TEXT_DIM,
@@ -440,32 +507,22 @@ class PicchooserGUI:
                 4, 4, cw - 4, ch - 4, outline=COLOR_DONE, width=4)
 
     def _render_thumb_bar(self):
-        """渲染下方缩略图条。"""
+        """渲染下方缩略图条：先画占位框，再异步逐张填充图片。"""
         self.thumb_canvas.delete("all")
         self._thumb_photos = []
         self._thumb_widgets = []
         if not self.groups:
             return
         _, files = self.groups[self.group_index]
+        gen = self._render_gen
 
+        # 先画所有占位框（瞬时完成，界面立即响应）
         x = THUMB_PAD
         for idx, path in enumerate(files):
-            img = None
-            if self.thumbs.available:
-                img = self.thumbs.get(path, THUMB_SIZE)
-            if img is None:
-                img = self._load_with_pillow(path)
-            if img is None:
-                img = Image.new("RGB", (THUMB_SIZE, THUMB_SIZE), (60, 60, 60))
-            img = self._fit(img, THUMB_SIZE, THUMB_SIZE)
-            photo = ImageTk.PhotoImage(img)
-            self._thumb_photos.append(photo)
-
             y = THUMB_PAD
-            item = self.thumb_canvas.create_image(x, y, anchor="nw", image=photo)
+            item = self.thumb_canvas.create_image(x, y, anchor="nw")
             self._thumb_widgets.append((item, idx))
 
-            # 选中 / 已成片 边框
             if idx == self.photo_index:
                 outline, width = COLOR_THUMB_SEL, 3
             elif path in self.done_set:
@@ -480,6 +537,24 @@ class PicchooserGUI:
 
         self.thumb_canvas.configure(scrollregion=(0, 0, x, THUMB_SIZE + 2 * THUMB_PAD))
         self._scroll_thumb_to_current()
+
+        # 异步逐张填充（优先级 2，高于预取）
+        for idx, path in enumerate(files):
+            self._schedule(2, lambda i=idx, p=path, g=gen:
+                           self._fill_thumb(i, p, g))
+
+    def _fill_thumb(self, idx, path, gen):
+        """填充单张缩略图（异步任务）。"""
+        if gen != self._render_gen or idx >= len(self._thumb_widgets):
+            return
+        img = self._get_thumb(path, THUMB_SIZE)
+        if img is None:
+            img = Image.new("RGB", (THUMB_SIZE, THUMB_SIZE), (60, 60, 60))
+        img = self._fit(img, THUMB_SIZE, THUMB_SIZE)
+        photo = ImageTk.PhotoImage(img)
+        self._thumb_photos.append(photo)
+        item, _ = self._thumb_widgets[idx]
+        self.thumb_canvas.itemconfigure(item, image=photo)
 
     def _scroll_thumb_to_current(self):
         """让缩略图条滚动到当前图片可见。"""
@@ -499,6 +574,71 @@ class PicchooserGUI:
         frac = (target - (view_w - THUMB_SIZE) / 2) / content_w
         frac = max(0.0, min(1.0, frac))
         self.thumb_canvas.xview_moveto(frac)
+
+    # ---------------- 缩略图缓存 ----------------
+
+    def _cache_file(self, path, size):
+        """磁盘缓存文件路径：以 路径+mtime+大小+尺寸 的哈希命名，原图改动自动失效。"""
+        try:
+            st = os.stat(path)
+            key = f"{CACHE_VERSION}|{os.path.abspath(path)}|{st.st_mtime_ns}|{st.st_size}|{size}"
+        except OSError:
+            return None
+        h = hashlib.md5(key.encode("utf-8")).hexdigest()
+        return os.path.join(self.temp_dir, f"{h}.png")
+
+    def _get_thumb(self, path, size):
+        """获取缩略图（内存缓存 → 磁盘缓存 → DLL/Pillow 生成）。"""
+        key = (path, size)
+        img = self._thumb_cache.get(key)
+        if img is not None:
+            return img
+
+        # 磁盘缓存
+        cache_file = self._cache_file(path, size)
+        if cache_file and os.path.exists(cache_file):
+            try:
+                img = Image.open(cache_file).convert("RGB")
+                self._thumb_cache[key] = img
+                return img
+            except Exception:
+                pass  # 缓存损坏，重新生成
+
+        # 生成：优先 DLL，回退 Pillow
+        img = None
+        if self.thumbs.available:
+            img = self.thumbs.get(path, size)
+        if img is None:
+            img = self._load_with_pillow(path)
+        if img is None:
+            return None
+
+        self._thumb_cache[key] = img
+        self._write_cache(cache_file, img)
+        return img
+
+    def _write_cache(self, cache_file, img):
+        """把缩略图写入磁盘缓存（失败静默忽略）。"""
+        if not cache_file:
+            return
+        try:
+            os.makedirs(self.temp_dir, exist_ok=True)
+            img.save(cache_file, "PNG")
+        except Exception:
+            pass
+
+    def _get_main(self, path, size):
+        """获取大图（LRU 内存缓存，最多 MAIN_CACHE_MAX 张）。"""
+        key = (path, size)
+        if key in self._main_cache:
+            self._main_cache.move_to_end(key)
+            return self._main_cache[key]
+        img = self._get_thumb(path, size)
+        if img is not None:
+            self._main_cache[key] = img
+            if len(self._main_cache) > MAIN_CACHE_MAX:
+                self._main_cache.popitem(last=False)
+        return img
 
     # ---------------- 图像工具 ----------------
 
@@ -554,6 +694,8 @@ class PicchooserGUI:
         new = self.photo_index + delta
         if 0 <= new < len(files):
             self.photo_index = new
+            self._render_gen += 1      # 作废旧的填充任务
+            self._task_queue.clear()
             self._refresh_status()
             self._render_main()
             self._render_thumb_bar()

@@ -20,7 +20,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     # 随程序分发的数据文件：教程文本（打包后解包到 _MEIPASS，由 get_resource_path 读取）
-    datas=[("tutorial.txt", ".")],
+    datas=[("tutorial.html", ".")],
     hiddenimports=["exifread"],
     hookspath=[],
     hooksconfig={},
