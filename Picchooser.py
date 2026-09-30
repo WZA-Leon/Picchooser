@@ -90,6 +90,9 @@ def _find_config():
 
 CONFIG_FILE = _find_config()
 
+# 缩略图缓存目录名（位于分类结果目录下，与 PicchooserGUI.TEMP_DIR_NAME 保持一致）
+TEMP_DIR_NAME = "temp"
+
 
 def get_start_dir():
     """
@@ -606,6 +609,83 @@ def get_source_dir(config):
     if source_dir in (None, "", "."):
         return os.getcwd()
     return os.path.abspath(source_dir)
+
+
+def get_result_dir(config):
+    """
+    解析分类结果目录（与 PicchooserGUI._resolve_result_dir 保持一致）：
+    优先使用配置里的 dest_folder，否则回退到源目录。
+    :param config: 配置字典
+    :return: 结果目录绝对路径
+    """
+    dest = config.get("dest_folder")
+    if dest:
+        return os.path.abspath(dest)
+    return get_source_dir(config)
+
+
+def clear_cache(config, prompt=input):
+    """
+    「清理缓存」：删除结果目录下的 temp 缩略图缓存文件夹（PicchooserGUI 生成）。
+    仅删除 temp 目录本身，不影响分类结果与成片。
+    :param config: 配置字典
+    :param prompt: 读取用户输入的函数（默认 input，便于测试注入）
+    """
+    clear_screen()
+
+    result_dir = get_result_dir(config)
+    temp_dir = os.path.join(result_dir, TEMP_DIR_NAME)
+
+    log_colored("清理缓存", "cyan")
+    log(f"  缓存目录：{temp_dir}")
+
+    if not os.path.isdir(temp_dir):
+        log_colored("[提示] 未发现缓存目录，无需清理。", "yellow")
+        wait_for_enter(prompt)
+        clear_screen()
+        return
+
+    # 统计缓存文件数量与占用空间，便于用户确认
+    file_count = 0
+    total_size = 0
+    try:
+        for name in os.listdir(temp_dir):
+            full = os.path.join(temp_dir, name)
+            if os.path.isfile(full):
+                file_count += 1
+                try:
+                    total_size += os.path.getsize(full)
+                except OSError:
+                    pass
+    except OSError as e:
+        log_colored(f"[错误] 无法读取缓存目录：{describe_error(e)}", "red")
+        wait_for_enter(prompt)
+        clear_screen()
+        return
+
+    size_mb = total_size / (1024 * 1024)
+    log(f"  共 {file_count} 个缓存文件，约 {size_mb:.2f} MB")
+
+    # 二次确认，避免误删
+    try:
+        answer = prompt("确认清理以上缓存？(y/N)：").strip().lower()
+    except EOFError:
+        answer = "n"
+    if answer not in ("y", "yes"):
+        log_colored("[提示] 已取消清理。", "yellow")
+        wait_for_enter(prompt)
+        clear_screen()
+        return
+
+    # 删除 temp 目录（含其中所有文件）
+    try:
+        shutil.rmtree(temp_dir)
+        log_colored(f"[完成] 已清理缓存，释放约 {size_mb:.2f} MB。", "green")
+    except OSError as e:
+        log_colored(f"[错误] 清理缓存失败：{describe_error(e)}", "red")
+
+    wait_for_enter(prompt)
+    clear_screen()
 
 
 def get_supported_files(dir_path, supported_ext):
@@ -1242,6 +1322,10 @@ def main(config_path=CONFIG_FILE, prompt=input):
                 log_colored(f"[错误] 图形界面运行出错：{describe_error(e)}", "red")
                 wait_for_enter(prompt)
 
+        def on_clear_cache():
+            """选择 [7] 清理缓存：删除结果目录下的 temp 缩略图缓存"""
+            clear_cache(config, prompt)
+
         # 主循环：切换目录/修改配置后会重新询问；分类完成后回到菜单再次询问
         while True:
             mode = ask_mode(
@@ -1251,6 +1335,7 @@ def main(config_path=CONFIG_FILE, prompt=input):
                 on_change_dir=on_change_dir,
                 on_tutorial=on_tutorial,
                 on_gui=on_gui,
+                on_clear_cache=on_clear_cache,
             )
             if mode is None:
                 # 用户选择 [0] 退出
