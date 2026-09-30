@@ -89,6 +89,20 @@ def _find_config():
 
 CONFIG_FILE = _find_config()
 
+
+def get_start_dir():
+    """
+    获取本次启动的「操作目录」。
+    优先级：
+    1. 环境变量 PICC_START_DIR（由 picc.exe 在终端调用时写入，值为终端所在目录）
+    2. 无有效值时返回 None（由调用方回退到配置里的上次目录）
+    :return: 目录绝对路径或 None
+    """
+    env_dir = os.environ.get("PICC_START_DIR")
+    if env_dir and os.path.isdir(env_dir):
+        return os.path.abspath(env_dir)
+    return None
+
 # 参数默认值：当 JSON 里缺少某项时，用这里的值兜底
 DEFAULT_CONFIG = {
     "source_folder": ".",  # 源图片文件夹；"." 或 null = 运行命令的当前目录
@@ -427,11 +441,16 @@ def classify_photos(config):
     """
     # ---------- 从配置中取出各项参数 ----------
     # source_folder 为 "." 或 null 时，表示运行命令的当前工作目录
-    source_dir = config["source_folder"]
-    if source_dir in (None, "", "."):
-        source_dir = os.getcwd()
+        # 终端里调用 picc 时，优先使用启动目录（终端所在目录）
+    start_dir = get_start_dir()
+    if start_dir:
+        source_dir = start_dir
     else:
-        source_dir = os.path.abspath(source_dir)
+        source_dir = config["source_folder"]
+        if source_dir in (None, "", "."):
+            source_dir = os.getcwd()
+        else:
+            source_dir = os.path.abspath(source_dir)
     dest_dir = config["dest_folder"]
     log(f"源目录：{source_dir}")
     copy_mode = config["copy_mode"]
@@ -578,6 +597,10 @@ def get_source_dir(config):
     :param config: 配置字典
     :return: 源目录绝对路径
     """
+        # 终端里调用 picc 时，优先使用启动目录（终端所在目录）
+    start_dir = get_start_dir()
+    if start_dir:
+        return start_dir
     source_dir = config.get("source_folder")
     if source_dir in (None, "", "."):
         return os.getcwd()
@@ -1170,9 +1193,14 @@ def main(config_path=CONFIG_FILE, prompt=input):
         config = load_config(config_path)
 
         # 若配置里保存了固定的源目录（非 "." / 空），提示"已加载上次目录"
-        saved_source = config.get("source_folder")
-        if saved_source not in (None, "", "."):
-            log(f"[提示] 已加载上次目录：{os.path.abspath(saved_source)}")
+                # 终端里调用 picc 时，操作目录为终端所在目录，不提示"上次目录"
+        start_dir = get_start_dir()
+        if start_dir:
+            log(f"[提示] 当前操作目录：{start_dir}")
+        else:
+            saved_source = config.get("source_folder")
+            if saved_source not in (None, "", "."):
+                log(f"[提示] 已加载上次目录：{os.path.abspath(saved_source)}")
 
         # 在「选择处理方式」菜单里提供「修改配置」入口；改完重新读取配置
         def on_edit():

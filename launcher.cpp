@@ -60,14 +60,35 @@ int main()
     SetEnvironmentVariableW(L"TCL_LIBRARY", (runtimeDir / L"tcl" / L"tcl8.6").c_str());
     SetEnvironmentVariableW(L"TK_LIBRARY", (runtimeDir / L"tcl" / L"k8.6").c_str());
 
+    // 获取启动时的工作目录（CWD）。
+    // - 在终端里输入 picc：CWD 是终端所在目录，应作为操作目录
+    // - 双击 picc.exe：CWD 是程序安装目录，此时不传，让程序用配置里的上次目录
+    wchar_t cwdBuf[MAX_PATH] = { 0 };
+    DWORD cwdLen = GetCurrentDirectoryW(MAX_PATH, cwdBuf);
+    fs::path startDir;
+    if (cwdLen > 0 && cwdLen < MAX_PATH)
+    {
+        fs::path cwd(cwdBuf);
+        std::error_code ec;
+        fs::path cwdCanon = fs::weakly_canonical(cwd, ec);
+        fs::path appCanon = fs::weakly_canonical(appDir, ec);
+        if (cwdCanon != appCanon)
+            startDir = cwd;  // 从其他目录调用，记录该目录
+    }
+
     // 用 python.exe 启动命令行主程序，并分配独立控制台窗口
     std::wstring runCmd = L"\"" + pythonExe.wstring() + L"\" \"" + mainPy.wstring() + L"\"";
     STARTUPINFOW si2 = { sizeof(si2) };
     PROCESS_INFORMATION pi2;
 
+    // 若从其他目录调用，则把该目录作为 python 的工作目录，并写入环境变量
+    const wchar_t* workDir = startDir.empty() ? appDir.c_str() : startDir.c_str();
+    if (!startDir.empty())
+        SetEnvironmentVariableW(L"PICC_START_DIR", startDir.c_str());
+
     if (!CreateProcessW(NULL, &runCmd[0],
         NULL, NULL, FALSE, CREATE_NEW_CONSOLE, NULL,
-        appDir.c_str(), &si2, &pi2))
+        workDir, &si2, &pi2))
     {
         MessageBoxW(NULL, L"启动主程序失败", L"错误", MB_ICONERROR);
         return 1;
